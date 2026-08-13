@@ -8,6 +8,11 @@ import { createChatPanel } from "./chat_panel.js";
 // Must match config.SUBGRAPH_WRAP_THRESHOLD.
 const SUBGRAPH_WRAP_THRESHOLD = 6;
 
+// How long after a build an execution error is still attributed to it.
+// Bounded so the agent does not claim responsibility for a failure in a
+// workflow the user has since rewritten by hand.
+const BUILD_ERROR_WINDOW_MS = 5 * 60 * 1000;
+
 // ComfyUI auto-loads .js from WEB_DIRECTORY but not .css, so the stylesheet
 // has to be linked in explicitly or the CHAT panel renders unstyled.
 function injectStylesheet() {
@@ -161,6 +166,11 @@ async function triggerBuild(node) {
             const injectResult = injectWorkflow(
                 app, spec, wrapThreshold, result.incomplete_inputs ?? [],
             );
+            // Remember what this build put on the canvas, so a later execution
+            // error can be attributed to it rather than to an unrelated part
+            // of the user's workflow.
+            node.comfyAgentBuiltNodeIds = new Set(injectResult.createdNodeIds ?? []);
+            node.comfyAgentBuiltAt = Date.now();
             let msg = `Done — built ${injectResult.nodeCount} nodes, ${injectResult.linkCount} links`;
             if (injectResult.failedTypes.length) {
                 msg += ` (failed: ${injectResult.failedTypes.join(", ")})`;
@@ -223,7 +233,32 @@ app.registerExtension({
             ].filter(Boolean).join("\n");
             if (!text) return;
             for (const n of app.graph?._nodes || []) {
-                if (n.comfyClass === "ComfyAgent") n.comfyAgentLastError = text;
+                if (n.comfyClass !== "ComfyAgent") continue;
+                n.comfyAgentLastError = text;
+
+                // Close the loop on BUILD: if the failing node is one this
+                // agent just placed, say so on the node itself. Otherwise the
+                // only signal was a generic ComfyUI error dialog, leaving the
+                // agent reporting a build it had no idea was broken.
+                const built = n.comfyAgentBuiltNodeIds;
+                const fresh =
+                    n.comfyAgentBuiltAt &&
+                    Date.now() - n.comfyAgentBuiltAt < BUILD_ERROR_WINDOW_MS;
+                // `==` not `===`: LiteGraph node ids are numbers while the
+                // event reports them as strings in some ComfyUI versions.
+                const isOurs =
+                    built &&
+                    detail.node_id !== undefined &&
+                    [...built].some((id) => id == detail.node_id);
+                if (fresh && isOurs && !n.comfyAgentBuilding) {
+                    const label = detail.node_type || `node ${detail.node_id}`;
+                    setStatus(
+                        n,
+                        `This build failed to run: ${label} — ` +
+                        `${detail.exception_type || "error"}. ` +
+                        "Switch to CHAT and ask why for a diagnosis.",
+                    );
+                }
             }
         });
 
@@ -338,6 +373,7 @@ app.registerExtension({
             this.comfyAgentBuildId = null;
             this.comfyAgentChatId = null;
             this.comfyAgentStatusWidget = null;
+            this.comfyAgentBuiltNodeIds = null;
             return originalOnRemoved?.apply(this, arguments);
         };
 
