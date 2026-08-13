@@ -48,7 +48,12 @@ function installLiteGraph({ failTypes = [] } = {}) {
 function makeApp(existingNodes = []) {
     const graph = {
         _nodes: [...existingNodes],
+        _nextId: existingNodes.length + 1,
         add(n) {
+            // LiteGraph assigns the id on add(), not on createNode(). The
+            // stub must do the same or createdNodeIds looks populated while
+            // being entirely undefined.
+            if (n.id === undefined) n.id = this._nextId++;
             this._nodes.push(n);
         },
         setDirtyCanvas() {},
@@ -284,6 +289,43 @@ test("a link naming a slot that does not exist is reported as skipped", () => {
     assert.equal(result.linkCount, 0);
     assert.equal(result.skippedLinks.length, 1);
     assert.match(result.skippedLinks[0], /nonexistent/);
+});
+
+test("createdNodeIds reports the ids of every placed node", () => {
+    installLiteGraph();
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [],
+        },
+        6,
+    );
+    assert.equal(result.createdNodeIds.length, 2);
+    // Attribution of a later execution error depends on these being real ids,
+    // so an all-undefined list must fail rather than look populated.
+    assert.ok(result.createdNodeIds.every((id) => id !== undefined));
+    assert.deepEqual(
+        result.createdNodeIds,
+        app.graph._nodes.map((n) => n.id),
+    );
+});
+
+test("createdNodeIds omits nodes that failed to create", () => {
+    installLiteGraph({ failTypes: ["SaveImage"] });
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [],
+        },
+        6,
+    );
+    assert.equal(result.createdNodeIds.length, 1);
 });
 
 test("a fully wired spec reports no skipped links", () => {
