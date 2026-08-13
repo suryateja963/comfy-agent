@@ -196,10 +196,17 @@ async def health(request: web.Request) -> web.Response:
     else:
         if primary not in installed:
             hints.append(f"Primary model missing — run `ollama pull {config.BASE_MODEL}`.")
-        if fallback not in installed:
+        if fallback not in installed or fallback == primary:
+            # `fallback == primary` is the case that actually bites: models
+            # resolved fine, but there is nothing *better* than the primary to
+            # escalate to. MODIFY runs on the escalation model by design —
+            # measured, a sub-1B edits the wrong node with the wrong value —
+            # so this is a correctness warning for MODIFY, not just a quality
+            # note for BUILD.
             hints.append(
                 "No escalation model installed — run "
-                f"`ollama pull {config.FALLBACK_CHAIN[0]}` for better free-form builds."
+                f"`ollama pull {config.FALLBACK_CHAIN[1]}`. MODIFY is unreliable "
+                "without one, and free-form builds are lower quality."
             )
         if config.EMBED_MODEL not in installed:
             hints.append(

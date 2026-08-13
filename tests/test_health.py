@@ -165,6 +165,17 @@ def test_health_counts_blueprints():
     print(f"ok: health counts {expected} blueprints")
 
 
+def test_health_warns_when_only_one_model_is_installed():
+    """The case that actually bites: models resolve fine, but there is nothing
+    better than the primary to escalate to. MODIFY runs on the escalation
+    model by design, so this is a correctness warning, not a quality note."""
+    _patch(available=True, installed=[config.BASE_MODEL, config.EMBED_MODEL])
+    body = _call_health().body.decode()
+    assert "MODIFY is unreliable" in body, "a single-model install must warn about MODIFY"
+    assert f"ollama pull {config.FALLBACK_CHAIN[1]}" in body
+    print("ok: a single-model install is warned that MODIFY is unreliable")
+
+
 def test_superseded_modes_name_their_replacement():
     """A workflow saved before EXPLAIN/DEBUG/SUGGEST were removed from the
     node still sends them. The reply must point at CHAT rather than reading

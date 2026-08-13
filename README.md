@@ -191,8 +191,14 @@ Verified against that live install: the V3 node loads and registers
 resolves `v0_0_2`), all 8 blueprints reference node types that are actually
 present, the free-form pipeline builds and honestly reports unwired inputs,
 `/agent/health` reports accurately, and the semantic index builds over 1767
-nodes in ~21s and then re-uses its cache in ~1s. The JS layer (canvas
-injection, Undo, `applyDiff`) is still covered only by its own test suite. The Week 10 quality re-baselining (VND/NodeComp/
+nodes in ~21s and then re-uses its cache in ~1s.
+
+MODIFY was then exercised on a real 7-node canvas across widget edits, adds,
+removals, a node replacement, and a three-part edit — all produced the
+correct minimal diff on `qwen3.5:4b`. The JS layer's *logic* is covered by
+its own suite against stubs, and `tests/test_frontend_api.py` checks the
+LiteGraph APIs it calls still exist in the installed frontend; the rendered
+UI itself has not been driven in a browser. The Week 10 quality re-baselining (VND/NodeComp/
 LinkComp against a real 20-case golden set) also hasn't happened — what's been
 done here is bug-fixing against observed failures, not the full metric suite.
 Retrieval likewise has no formal recall benchmark; it was tuned against
@@ -283,8 +289,8 @@ conversations and large graphs, not for typical questions.
 ### 5. Run the tests
 
 ```bash
-pytest tests/                          # 78 Python tests
-node --test tests/canvas_writer.test.mjs   # 28 JS tests, no npm install needed
+pytest tests/                          # 87 Python tests
+node --test tests/canvas_writer.test.mjs tests/health_summary.test.mjs   # 35 JS tests
 ```
 
 (Pass the `.mjs` file explicitly — a quoted `tests/*.test.mjs` glob is not

@@ -1,6 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { applyDiff, injectWorkflow, restoreGraph, snapshotGraph } from "./canvas_writer.js";
+import { healthSummary } from "./health_summary.js";
 import { listenForAgentProgress, listenForChatTokens } from "./progress_listener.js";
 import { createChatPanel } from "./chat_panel.js";
 
@@ -65,20 +66,8 @@ async function fetchHealth() {
     }
 }
 
-/**
- * One status line describing the first real problem, with the command that
- * fixes it. The server already ranks hints most-blocking-first, so leading
- * with hints[0] avoids burying "Ollama is down" under a note about the embed
- * model. Blueprint builds need no Ollama at all, so an Ollama problem is
- * reported as a limitation rather than as a dead node.
- */
-function healthSummary(health) {
-    if (!health) return null;
-    const hints = Array.isArray(health.hints) ? health.hints : [];
-    if (!hints.length) return null;
-    if (!health.ollama) return `${hints[0]} Blueprint builds still work.`;
-    return hints[0];
-}
+// healthSummary lives in its own module so it can be unit-tested: this file
+// imports ComfyUI's app.js, which only resolves inside a running ComfyUI.
 
 async function triggerBuild(node) {
     const getWidget = (name) => node.widgets?.find((w) => w.name === name);
