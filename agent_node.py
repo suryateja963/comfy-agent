@@ -60,9 +60,18 @@ class ComfyAgentNode(io.ComfyNode):
                 io.String.Input("task_prompt", multiline=True, tooltip="Describe the workflow you want"),
                 io.Combo.Input(
                     "mode",
-                    options=["BUILD", "CHAT", "MODIFY", "EXPLAIN", "DEBUG", "SUGGEST"],
+                    # EXPLAIN/DEBUG/SUGGEST are deliberately absent: CHAT
+                    # supersedes all three (MASTER_PLAN.md Section 3A
+                    # amendment). A user asking "why is my image black?" wants
+                    # explanation, diagnosis and a suggestion in one answer,
+                    # and offering modes that only return "not implemented"
+                    # is worse than not offering them.
+                    options=["BUILD", "MODIFY", "CHAT"],
                     default="BUILD",
-                    tooltip="BUILD writes a workflow to the canvas; CHAT opens a conversation panel",
+                    tooltip=(
+                        "BUILD writes a new workflow; MODIFY edits the one on "
+                        "the canvas; CHAT opens a conversation panel"
+                    ),
                 ),
                 io.Combo.Input(
                     "task_category",
