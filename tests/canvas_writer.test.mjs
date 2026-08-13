@@ -260,6 +260,47 @@ test("links referencing a failed node are skipped without throwing", () => {
         6,
     );
     assert.equal(result.linkCount, 0);
+    // The dropped link must be reported, not merely absent: "0 links" alone
+    // does not tell the user a link was requested and lost.
+    assert.equal(result.skippedLinks.length, 1);
+    assert.match(result.skippedLinks[0], /node not created/);
+});
+
+test("a link naming a slot that does not exist is reported as skipped", () => {
+    installLiteGraph();
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [
+                // SaveImage has no input called "nonexistent".
+                { from_node: "ks_1", from_output: "out", to_node: "save_1", to_input: "nonexistent" },
+            ],
+        },
+        6,
+    );
+    assert.equal(result.linkCount, 0);
+    assert.equal(result.skippedLinks.length, 1);
+    assert.match(result.skippedLinks[0], /nonexistent/);
+});
+
+test("a fully wired spec reports no skipped links", () => {
+    installLiteGraph();
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [
+                { from_node: "ks_1", from_output: "out", to_node: "save_1", to_input: "in" },
+            ],
+        },
+        6,
+    );
+    assert.equal(result.skippedLinks.length, 0);
 });
 
 test("injected nodes do not overlap existing canvas content", () => {
