@@ -20,7 +20,9 @@ What exists:
 - `agent_node.py` — V3-schema node. Imports the newest *pinned* `comfy_api`
   version available (`v0_0_3`, then `v0_0_2`), falling back to
   `comfy_api.latest` only if no pinned version is importable, so a ComfyUI
-  release that retires a version cannot make the node unloadable. Verified
+  release that retires a version cannot make the node unloadable. Confirmed
+  on ComfyUI v0.32.0: only `v0_0_1`, `v0_0_2` and `latest` exist, so the
+  ladder resolves `v0_0_2` — `v0_0_3` is there for when it ships. Verified
   against the real `comfy_api.latest._io.py` on a live install (`io.Schema`,
   `io.String`/`Combo`/`Int`/`Boolean` `.Input`/`.Output`, `NodeOutput` arg
   order, `ComfyExtension.get_node_list`) — not a guess anymore.
@@ -172,14 +174,25 @@ noticeably better explanations at some VRAM cost.
 What is explicitly not done: Phase 3's EXPLAIN/DEBUG/SUGGEST modes (CHAT
 covers much of what EXPLAIN/DEBUG were meant to do, but the dedicated modes
 still return "not implemented"), context auto-clear, Phase 4
-(cross-platform/version testing). MODIFY is implemented as a validated,
-undoable diff and has been smoke-tested against a live Ollama, which is how
-two defects in it were found and fixed (widget values arriving wrapped in a
-descriptor object, and the 0.8B proposing wholesale deletion to change one
-value). **MODIFY quality still depends heavily on model size**: measured on
-`qwen3.5:4b` and `:9b` it produces the correct minimal diff; on the 0.8B it
-is unreliable for anything beyond a single widget change. Nothing in the node
-has yet been exercised against a running ComfyUI. The Week 10 quality re-baselining (VND/NodeComp/
+(cross-platform/version testing).
+
+MODIFY is implemented as a validated, undoable diff. It has been smoke-tested
+against a live ComfyUI (1767 nodes) plus a live Ollama, which is how three
+defects in it were found and fixed: widget values arriving wrapped in a
+descriptor object (`{"i": 35}`) from every model size, the 0.8B proposing
+wholesale deletion to change one value, and the 0.8B editing an unrelated
+node with an unrelated value. **MODIFY now runs on the escalation model
+first** — measured, `qwen3.5:4b` and `:9b` produce the correct minimal diff
+where the 0.8B does not — so `ollama pull qwen3.5:4b` is effectively required
+for MODIFY even though BUILD works without it.
+
+Verified against that live install: the V3 node loads and registers
+(`comfy_api.v0_0_3` does not exist yet, so the import ladder correctly
+resolves `v0_0_2`), all 8 blueprints reference node types that are actually
+present, the free-form pipeline builds and honestly reports unwired inputs,
+`/agent/health` reports accurately, and the semantic index builds over 1767
+nodes in ~21s and then re-uses its cache in ~1s. The JS layer (canvas
+injection, Undo, `applyDiff`) is still covered only by its own test suite. The Week 10 quality re-baselining (VND/NodeComp/
 LinkComp against a real 20-case golden set) also hasn't happened — what's been
 done here is bug-fixing against observed failures, not the full metric suite.
 Retrieval likewise has no formal recall benchmark; it was tuned against
@@ -310,7 +323,7 @@ semantic index is built, and a `hints` array naming each fix.
 | Build reports *N link(s) not wired* | Model could not connect everything | The nodes are placed and highlighted in amber — finish the wiring by hand, or press **Undo Last Agent Action** and retry |
 | `too many concurrent builds in progress` | Two builds at once | Wait for the first to finish (`MAX_CONCURRENT_BUILDS = 2`) |
 | MODIFY says *the canvas is empty* | Nothing to modify | MODIFY edits an existing workflow. Use BUILD first |
-| MODIFY makes the wrong edit | 0.8B model reasoning over existing node ids | The hardest ask in the pipeline. Pull `qwen3.5:4b` or `:9b` — measured correct where the 0.8B was not. Press **Undo Last Agent Action** and retry |
+| MODIFY makes the wrong edit | Only the 0.8B is installed | MODIFY runs on the escalation model by design; without one it falls back to the primary, which is measurably unreliable here. `ollama pull qwen3.5:4b`. Press **Undo Last Agent Action** and retry |
 | Mode says it *has been replaced by CHAT* | Workflow saved before EXPLAIN/DEBUG/SUGGEST were retired | Set `mode = CHAT`, which covers all three |
 | Node does not appear in ComfyUI at all | Import failed | Check the ComfyUI console for `comfy_agent`. A `no usable comfy_api version found` line means this ComfyUI is too old for the V3 schema |
 | Everything is slow | Small model on CPU | Expected. Blueprint builds bypass the model entirely |

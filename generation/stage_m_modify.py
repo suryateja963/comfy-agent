@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .. import llm_client
+from .. import config, llm_client
 from ..knowledge.type_validator import is_widget_input
 from .stage_b_configure import _coerce as coerce_widget_value
 
@@ -287,10 +287,41 @@ async def generate_diff(
         )
 
     prompt = build_prompt(task_prompt, nodes, schema_block)
+
+    # MODIFY goes to the escalation model first, unlike every other stage.
+    # Measured against a live install (1767 nodes, real blueprint canvas):
+    # asked to set steps to 35, qwen3.5:4b and :9b both returned exactly
+    # {node_id: 5, widget: "steps", value: 35}, while the 0.8B edited an
+    # unrelated node with an unrelated value on every attempt. Reasoning over
+    # existing node ids is materially harder than the additive stages, and a
+    # wrong MODIFY silently corrupts work the user already has - so paying the
+    # extra latency is the right trade here even though BUILD does not.
+    primary, fallback = await llm_client.resolve_models()
+    preferred = fallback if fallback != primary else primary
+
     try:
-        result, model_used = await llm_client.generate_json_with_fallback(
-            prompt=prompt, schema=SCHEMA, system=SYSTEM
-        )
+        if preferred != primary:
+            try:
+                result = await llm_client.generate_json(
+                    prompt=prompt, schema=SCHEMA, model=preferred, system=SYSTEM
+                )
+                model_used = preferred
+            except llm_client.OllamaGenerationError as exc:
+                logger.info("stage M: %s failed (%s); falling back to %s", preferred, exc, primary)
+                result, model_used = await llm_client.generate_json_with_fallback(
+                    prompt=prompt, schema=SCHEMA, system=SYSTEM
+                )
+        else:
+            # Only one model installed. It still runs, but a small model is
+            # unreliable here and the caller should be able to say so.
+            logger.warning(
+                "stage M: only %s is installed. MODIFY is unreliable on a sub-1B "
+                "model - `ollama pull %s` for accurate edits.",
+                primary, config.FALLBACK_CHAIN[1],
+            )
+            result, model_used = await llm_client.generate_json_with_fallback(
+                prompt=prompt, schema=SCHEMA, system=SYSTEM
+            )
     except llm_client.OllamaGenerationError as exc:
         raise StageMError(f"MODIFY generation failed: {exc}") from exc
 
@@ -301,7 +332,9 @@ async def generate_diff(
     # deleting two of three canvas nodes, while the 4B and 9B returned exactly
     # the one widget change. Every id it named was real, so no amount of
     # validation catches this - the check has to be on the *shape* of the edit.
-    primary, fallback = await llm_client.resolve_models()
+    # Still worth checking after the preferred-model call above: it only
+    # applies when MODIFY had to run on the primary (nothing better installed,
+    # or the escalation model failed), which is exactly when this happens.
     if (
         _is_implausibly_destructive(diff, nodes)
         and model_used == primary
