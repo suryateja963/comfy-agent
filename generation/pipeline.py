@@ -283,6 +283,16 @@ async def modify_workflow(
         )
 
     warnings: list[str] = []
+    # Surfaced on the node, not just logged: MODIFY silently produces wrong
+    # edits on a sub-1B model, and a user watching the canvas has no other way
+    # to know the result is untrustworthy.
+    primary, fallback = await llm_client.resolve_models()
+    if fallback == primary:
+        warnings.append(
+            f"no escalation model installed, so this ran on {primary} — MODIFY is "
+            f"unreliable on a small model; `ollama pull {config.FALLBACK_CHAIN[1]}` "
+            "and check the result before keeping it"
+        )
     if diff.rejected:
         warnings.append(f"{len(diff.rejected)} proposed edit(s) rejected: {'; '.join(diff.rejected)}")
 
