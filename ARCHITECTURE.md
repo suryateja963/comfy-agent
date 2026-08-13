@@ -101,7 +101,8 @@ browser).
 custom_nodes/comfy_agent/
 ├── __init__.py              registers via comfy_entrypoint, sets WEB_DIRECTORY
 ├── agent_node.py            the ComfyAgent node itself (V3 schema)
-├── agent_routes.py          /agent/ping, /agent/build_workflow, /agent/chat
+├── agent_routes.py          /agent/ping, /agent/health, /agent/build_workflow,
+│                            /agent/chat
 ├── chat_context.py          CHAT system prompt: canvas + models + nodes + error
 ├── install_index.py         semantic index over all installed nodes + models
 ├── llm_client.py            async Ollama client, retry + fallback escalation
@@ -117,6 +118,7 @@ custom_nodes/comfy_agent/
 │   ├── stage_b_configure.py Stage B — widget values for each node
 │   ├── stage_c_connect.py   Stage C — links between nodes
 │   ├── stage_d_validate.py  Stage D — structural validation before it ships
+│   ├── stage_m_modify.py    Stage M — validated diff against the live canvas
 │   └── pipeline.py          orchestrates Pass 1 + Stages A–D, streams progress
 ├── blueprint_defs/          8 pre-authored workflow templates (JSON)
 └── js/
@@ -580,13 +582,23 @@ workflow JSON, drop it in `blueprint_defs/<name>.json`, and add its trigger
 keywords to `BLUEPRINT_KEYWORDS` in `blueprint_matcher.py`. No Python
 changes needed.
 
-**Add a mode:** `MODIFY`/`EXPLAIN`/`DEBUG`/`SUGGEST` are wired into
-`agent_routes.py`'s dispatch but currently return "not implemented yet" —
-each needs a handler function following the same shape as `_handle_build`.
-The canvas state they need is no longer missing: CHAT already receives a
-serialized graph on every request and `chat_context.render_graph_block()`
-trims it to the parts worth reasoning over, so a `MODIFY` handler can reuse
-that rather than rebuilding it. Note that `CHAT` is dispatched by its own
+**Add a mode:** `EXPLAIN`/`DEBUG`/`SUGGEST` are no longer offered by the node
+— CHAT supersedes all three (Section 3A amendment) — but the dispatch still
+accepts them so a workflow saved before that change gets a message naming the
+replacement rather than an opaque error. A genuinely new mode needs a handler
+following the same shape as `_handle_build`, plus an entry in the `mode` combo
+in `agent_node.py`. The canvas state a new mode needs is not missing: the
+frontend serializes the graph on every CHAT and MODIFY request, so a new
+handler can reuse that rather than rebuilding it.
+
+`MODIFY` is implemented and is the worked example to copy. It follows a
+different shape from `_handle_build` on purpose: `generation/stage_m_modify.py`
+returns a *diff* (`add_nodes` / `remove_node_ids` / `set_widgets`) validated
+against the live canvas ids and the installed registry, and the response
+carries `diff` instead of a `workflow_json` spec. The frontend snapshots the
+graph (`canvas_writer.snapshotGraph`) before calling `applyDiff`, which is
+what makes the edit undoable — mandatory for any mode that mutates existing
+user work rather than adding to empty space. Note that `CHAT` is dispatched by its own
 route (`/agent/chat`) rather than through `build_workflow`, because the build
 response shape cannot carry a token stream.
 

@@ -1,12 +1,52 @@
 """Agent meta-node — V3 schema. See MASTER_PLAN.md Section 3D for the slot spec.
 
-Pinned to comfy_api.v0_0_2 (current, not yet stable — re-pin on v0_0_3, see
-MASTER_PLAN.md Section 2B / 4A).
+Prefers a *pinned* comfy_api version, newest first, and only falls back to
+`comfy_api.latest` if no pinned version this file knows about is importable.
+That order is deliberate (MASTER_PLAN.md Section 2B / 4A): `latest` tracks
+whichever numbered API is still under development and can change without
+warning, so it is a last resort rather than the default.
+
+A bare `from comfy_api.v0_0_2 import ...` made the whole node unloadable the
+day a ComfyUI release stops shipping that version — with an ImportError that
+says nothing about which versions were tried.
 """
 
 from __future__ import annotations
 
-from comfy_api.v0_0_2 import ComfyExtension, io
+import logging
+
+logger = logging.getLogger("comfy_agent")
+
+# Newest pinned version first; `latest` last. Extend the pinned entries as new
+# versions are cut rather than switching the preference to `latest`.
+_API_MODULES = ("comfy_api.v0_0_3", "comfy_api.v0_0_2", "comfy_api.latest")
+
+ComfyExtension = None
+io = None
+_import_errors: list[str] = []
+
+for _module_name in _API_MODULES:
+    try:
+        _module = __import__(_module_name, fromlist=["ComfyExtension", "io"])
+        ComfyExtension = _module.ComfyExtension
+        io = _module.io
+    except (ImportError, AttributeError) as _exc:
+        _import_errors.append(f"{_module_name}: {_exc}")
+        continue
+    if _module_name != _API_MODULES[0]:
+        logger.info(
+            "comfy_agent: using %s (preferred %s unavailable)",
+            _module_name,
+            _API_MODULES[0],
+        )
+    break
+else:
+    raise ImportError(
+        "comfy_agent: no usable comfy_api version found. Tried: "
+        + "; ".join(_import_errors)
+    )
+
+del _API_MODULES, _import_errors, _module_name, _module
 
 
 class ComfyAgentNode(io.ComfyNode):
@@ -20,9 +60,18 @@ class ComfyAgentNode(io.ComfyNode):
                 io.String.Input("task_prompt", multiline=True, tooltip="Describe the workflow you want"),
                 io.Combo.Input(
                     "mode",
-                    options=["BUILD", "CHAT", "MODIFY", "EXPLAIN", "DEBUG", "SUGGEST"],
+                    # EXPLAIN/DEBUG/SUGGEST are deliberately absent: CHAT
+                    # supersedes all three (MASTER_PLAN.md Section 3A
+                    # amendment). A user asking "why is my image black?" wants
+                    # explanation, diagnosis and a suggestion in one answer,
+                    # and offering modes that only return "not implemented"
+                    # is worse than not offering them.
+                    options=["BUILD", "MODIFY", "CHAT"],
                     default="BUILD",
-                    tooltip="BUILD writes a workflow to the canvas; CHAT opens a conversation panel",
+                    tooltip=(
+                        "BUILD writes a new workflow; MODIFY edits the one on "
+                        "the canvas; CHAT opens a conversation panel"
+                    ),
                 ),
                 io.Combo.Input(
                     "task_category",

@@ -10,7 +10,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findFreeZone, injectWorkflow, setWidgetValue } from "../js/canvas_writer.js";
+import {
+    applyDiff,
+    findFreeZone,
+    injectWorkflow,
+    restoreGraph,
+    setWidgetValue,
+    snapshotGraph,
+} from "../js/canvas_writer.js";
 
 // Real widget order, as reported by a live ComfyUI /object_info. KSampler has
 // SIX widgets — blueprints authored against the legacy layout supply seven
@@ -48,10 +55,28 @@ function installLiteGraph({ failTypes = [] } = {}) {
 function makeApp(existingNodes = []) {
     const graph = {
         _nodes: [...existingNodes],
+        _nextId: existingNodes.length + 1,
         add(n) {
+            // LiteGraph assigns the id on add(), not on createNode(). The
+            // stub must do the same or createdNodeIds looks populated while
+            // being entirely undefined.
+            if (n.id === undefined) n.id = this._nextId++;
             this._nodes.push(n);
         },
+        remove(n) {
+            const i = this._nodes.indexOf(n);
+            if (i >= 0) this._nodes.splice(i, 1);
+        },
         setDirtyCanvas() {},
+        // Mirrors LiteGraph's save/load pair closely enough to test the
+        // snapshot/undo contract: serialize() must not alias live state, and
+        // configure() replaces the graph wholesale.
+        serialize() {
+            return JSON.parse(JSON.stringify({ nodes: this._nodes }));
+        },
+        configure(data) {
+            this._nodes = JSON.parse(JSON.stringify(data.nodes ?? []));
+        },
     };
     return { graph, canvas: null };
 }
@@ -260,6 +285,195 @@ test("links referencing a failed node are skipped without throwing", () => {
         6,
     );
     assert.equal(result.linkCount, 0);
+    // The dropped link must be reported, not merely absent: "0 links" alone
+    // does not tell the user a link was requested and lost.
+    assert.equal(result.skippedLinks.length, 1);
+    assert.match(result.skippedLinks[0], /node not created/);
+});
+
+test("a link naming a slot that does not exist is reported as skipped", () => {
+    installLiteGraph();
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [
+                // SaveImage has no input called "nonexistent".
+                { from_node: "ks_1", from_output: "out", to_node: "save_1", to_input: "nonexistent" },
+            ],
+        },
+        6,
+    );
+    assert.equal(result.linkCount, 0);
+    assert.equal(result.skippedLinks.length, 1);
+    assert.match(result.skippedLinks[0], /nonexistent/);
+});
+
+test("applyDiff removes, edits and adds in one pass", () => {
+    installLiteGraph();
+    const app = makeApp();
+    // Two real nodes to edit against.
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler", save_1: "SaveImage" }, widgets: {}, links: [] },
+        99, // above the wrap threshold check, so nothing is collapsed
+    );
+    const [ks, save] = app.graph._nodes;
+
+    const outcome = applyDiff(app, {
+        add_nodes: ["SaveImage"],
+        remove_node_ids: [save.id],
+        set_widgets: [{ node_id: ks.id, widget: "steps", value: 42 }],
+    });
+
+    assert.equal(outcome.removed, 1);
+    assert.equal(outcome.widgetsSet, 1);
+    assert.equal(outcome.added, 1);
+    assert.deepEqual(outcome.failed, []);
+    assert.equal(ks.widgets.find((w) => w.name === "steps").value, 42);
+    assert.ok(!app.graph._nodes.includes(save), "the removed node is off the canvas");
+});
+
+test("applyDiff edits widgets before removals take effect", () => {
+    // A diff that edits and removes different nodes must not lose the edit
+    // because the removal reindexed the graph first.
+    installLiteGraph();
+    const app = makeApp();
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler", save_1: "SaveImage" }, widgets: {}, links: [] },
+        99,
+    );
+    const [ks, save] = app.graph._nodes;
+
+    const outcome = applyDiff(app, {
+        add_nodes: [],
+        remove_node_ids: [save.id],
+        set_widgets: [{ node_id: ks.id, widget: "cfg", value: 7.5 }],
+    });
+    assert.equal(outcome.widgetsSet, 1);
+    assert.equal(ks.widgets.find((w) => w.name === "cfg").value, 7.5);
+});
+
+test("applyDiff reports edits it could not apply instead of throwing", () => {
+    installLiteGraph();
+    const app = makeApp();
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler" }, widgets: {}, links: [] },
+        99,
+    );
+    const outcome = applyDiff(app, {
+        add_nodes: [],
+        remove_node_ids: [9999],
+        set_widgets: [{ node_id: 9999, widget: "steps", value: 1 }],
+    });
+    assert.equal(outcome.removed, 0);
+    assert.equal(outcome.widgetsSet, 0);
+    assert.equal(outcome.failed.length, 2);
+});
+
+test("applyDiff on an empty diff changes nothing", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    const outcome = applyDiff(app, { add_nodes: [], remove_node_ids: [], set_widgets: [] });
+    assert.deepEqual(outcome, { removed: 0, widgetsSet: 0, added: 0, failed: [] });
+    assert.equal(app.graph._nodes.length, 1);
+});
+
+test("a snapshot taken before injection restores the original canvas", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    const before = snapshotGraph(app.graph);
+    assert.equal(app.graph._nodes.length, 1);
+
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler", save_1: "SaveImage" }, widgets: {}, links: [] },
+        6,
+    );
+    assert.equal(app.graph._nodes.length, 3, "injection should have added nodes");
+
+    assert.equal(restoreGraph(app, before), true);
+    assert.equal(app.graph._nodes.length, 1, "undo must remove the injected nodes");
+});
+
+test("a snapshot does not alias live graph state", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    const before = snapshotGraph(app.graph);
+    // Mutating the graph after snapshotting must not change the snapshot; a
+    // shallow copy here would make undo restore the post-change state.
+    app.graph._nodes[0].pos = [999, 999];
+    assert.deepEqual(before.nodes[0].pos, [100, 100]);
+});
+
+test("restoring a null snapshot is refused rather than clearing the canvas", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    assert.equal(restoreGraph(app, null), false);
+    assert.equal(app.graph._nodes.length, 1, "a failed undo must not wipe the graph");
+});
+
+test("snapshotGraph reports failure instead of throwing", () => {
+    const broken = { serialize() { throw new Error("unserializable node"); } };
+    assert.equal(snapshotGraph(broken), null);
+});
+
+test("createdNodeIds reports the ids of every placed node", () => {
+    installLiteGraph();
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [],
+        },
+        6,
+    );
+    assert.equal(result.createdNodeIds.length, 2);
+    // Attribution of a later execution error depends on these being real ids,
+    // so an all-undefined list must fail rather than look populated.
+    assert.ok(result.createdNodeIds.every((id) => id !== undefined));
+    assert.deepEqual(
+        result.createdNodeIds,
+        app.graph._nodes.map((n) => n.id),
+    );
+});
+
+test("createdNodeIds omits nodes that failed to create", () => {
+    installLiteGraph({ failTypes: ["SaveImage"] });
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [],
+        },
+        6,
+    );
+    assert.equal(result.createdNodeIds.length, 1);
+});
+
+test("a fully wired spec reports no skipped links", () => {
+    installLiteGraph();
+    const app = makeApp();
+    const result = injectWorkflow(
+        app,
+        {
+            node_instances: { ks_1: "KSampler", save_1: "SaveImage" },
+            widgets: {},
+            links: [
+                { from_node: "ks_1", from_output: "out", to_node: "save_1", to_input: "in" },
+            ],
+        },
+        6,
+    );
+    assert.equal(result.skippedLinks.length, 0);
 });
 
 test("injected nodes do not overlap existing canvas content", () => {

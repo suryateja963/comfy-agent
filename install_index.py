@@ -198,7 +198,42 @@ def _fingerprint(object_info: dict[str, Any]) -> str:
 # Cache
 # --------------------------------------------------------------------------
 
-def _load_cache(fingerprint: str) -> dict[str, Any] | None:
+# Cache format version. v2 keys vectors by node name so that installing or
+# removing a node pack re-embeds only what actually changed; v1 stored a bare
+# positional list tied to the sorted name order, which made any registry change
+# a full 1767-node rebuild.
+_CACHE_VERSION = 2
+
+
+def _load_cache(fingerprint: str, names: list[str]) -> list[list[float]] | None:
+    """Vectors in `names` order when the cache matches this registry exactly.
+
+    Returns None when the registry has changed at all; the caller then salvages
+    what it can via _load_cached_vectors() and embeds only the difference.
+    """
+    cached = _read_cache()
+    if cached is None:
+        return None
+    if cached.get("fingerprint") != fingerprint:
+        logger.info("node registry changed - reusing unchanged embeddings")
+        return None
+
+    by_name = cached.get("vectors_by_name")
+    if isinstance(by_name, dict):
+        if not all(name in by_name for name in names):
+            return None
+        return [by_name[name] for name in names]
+
+    # v1 cache: a bare positional list. Still usable *only* here, where the
+    # fingerprint proves the name list is byte-identical to the one that
+    # produced it.
+    vectors = cached.get("vectors")
+    if isinstance(vectors, list) and len(vectors) == len(names):
+        return vectors
+    return None
+
+
+def _read_cache() -> dict[str, Any] | None:
     if not _CACHE_PATH.exists():
         return None
     try:
@@ -207,12 +242,31 @@ def _load_cache(fingerprint: str) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError) as exc:
         logger.debug("ignoring unreadable index cache: %s", exc)
         return None
-    if cached.get("fingerprint") != fingerprint:
-        logger.info("node registry changed — rebuilding install index")
-        return None
-    if not cached.get("vectors"):
+    if not isinstance(cached, dict):
         return None
     return cached
+
+
+def _load_cached_vectors(names: list[str]) -> dict[str, list[float]]:
+    """Per-node vectors reusable for this registry, keyed by node name.
+
+    A v1 cache (positional list, no per-name mapping) cannot be salvaged
+    safely: its vectors are only meaningful against the exact sorted name list
+    that produced them, which is precisely what changed. It is ignored rather
+    than risking vectors silently attached to the wrong nodes.
+    """
+    cached = _read_cache()
+    if cached is None or cached.get("version") != _CACHE_VERSION:
+        return {}
+    by_name = cached.get("vectors_by_name")
+    if not isinstance(by_name, dict):
+        return {}
+    wanted = set(names)
+    return {
+        name: vec
+        for name, vec in by_name.items()
+        if name in wanted and isinstance(vec, list) and vec
+    }
 
 
 def _save_cache(payload: dict[str, Any]) -> None:
@@ -266,20 +320,55 @@ async def build(force: bool = False, on_progress=None) -> dict[str, Any]:
         models = await harvest_models()
 
         vectors: list[list[float]] = []
-        cached = None if force else _load_cache(fingerprint)
-        if cached and len(cached["vectors"]) == len(names):
-            vectors = cached["vectors"]
+        cached = None if force else _load_cache(fingerprint, names)
+        if cached is not None:
+            vectors = cached
+            # Clear any reason recorded by an earlier failed build in this
+            # process: retrieval is no longer degraded, and a stale reason is
+            # reported verbatim by stats() (and so by /agent/health).
+            _build_failed_reason = ""
             logger.info("loaded install index from cache (%d nodes)", len(names))
         else:
             started = time.monotonic()
-            logger.info("building install index: embedding %d nodes...", len(names))
-            try:
-                vectors = await _embed_all(descriptions, on_progress=on_progress)
-                _save_cache({"fingerprint": fingerprint, "vectors": vectors})
+            # Salvage vectors for nodes that are unchanged. Installing one node
+            # pack otherwise re-embedded all 1767 nodes, turning a ~2s update
+            # into the full ~22s build.
+            reusable = {} if force else _load_cached_vectors(names)
+            missing = [i for i, name in enumerate(names) if name not in reusable]
+            if reusable:
                 logger.info(
-                    "install index built in %.1fs (%d nodes)",
+                    "install index: reusing %d cached embedding(s), embedding %d new node(s)",
+                    len(reusable),
+                    len(missing),
+                )
+            else:
+                logger.info("building install index: embedding %d nodes...", len(names))
+            try:
+                fresh = await _embed_all(
+                    [descriptions[i] for i in missing], on_progress=on_progress
+                )
+                # Reassemble in `names` order: retrieval indexes vectors
+                # positionally against names/descriptions/schema_lines, so a
+                # misordered list would attach every score to the wrong node.
+                by_name = dict(reusable)
+                for i, vector in zip(missing, fresh):
+                    by_name[names[i]] = vector
+                vectors = [by_name[name] for name in names]
+                # Only the name->vector mapping is persisted: the positional
+                # list is derived from it on load, and storing both would
+                # double an already ~18 MB file.
+                _save_cache(
+                    {
+                        "version": _CACHE_VERSION,
+                        "fingerprint": fingerprint,
+                        "vectors_by_name": by_name,
+                    }
+                )
+                logger.info(
+                    "install index built in %.1fs (%d nodes, %d newly embedded)",
                     time.monotonic() - started,
                     len(names),
+                    len(missing),
                 )
                 _build_failed_reason = ""
             except Exception as exc:  # noqa: BLE001
@@ -304,9 +393,63 @@ def is_ready() -> bool:
     return _index is not None
 
 
+# Set once the first successful build finishes, so a caller can distinguish
+# "still warming" from "built" without racing the build lock.
+_ready_event: asyncio.Event | None = None
+
+
+def ready_event() -> asyncio.Event:
+    """Signalled when the index is usable.
+
+    Created lazily rather than at import: asyncio.Event binds to the running
+    loop on first await in older Python versions, and this module is imported
+    long before ComfyUI's loop exists.
+    """
+    global _ready_event
+    if _ready_event is None:
+        _ready_event = asyncio.Event()
+    if _index is not None:
+        _ready_event.set()
+    return _ready_event
+
+
+async def warm(retry_delay: float = 5.0, max_attempts: int = 3) -> None:
+    """Build the index in the background, once the server can answer.
+
+    Without this the 1767-node build ran inside the first CHAT request, which
+    blocked that request for the full build. Retries because this starts with
+    ComfyUI itself: /object_info is not served for the first moments after
+    launch, and a single failed attempt would leave every later chat paying
+    the cost this function exists to remove.
+    """
+    event = ready_event()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await build()
+            event.set()
+            logger.info("install index warm complete (%s)", stats())
+            return
+        except Exception as exc:  # noqa: BLE001
+            if attempt == max_attempts:
+                # Not fatal: retrieval degrades to keyword scoring, and the
+                # next chat request rebuilds via build()'s own lazy path.
+                logger.warning(
+                    "install index warm failed after %d attempts (%s); "
+                    "retrieval will degrade to keyword search",
+                    max_attempts,
+                    exc,
+                )
+                return
+            logger.debug("index warm attempt %d failed (%s); retrying", attempt, exc)
+            await asyncio.sleep(retry_delay)
+
+
 def stats() -> dict[str, Any]:
     if _index is None:
-        return {"ready": False}
+        # `building` distinguishes a warm already in flight from an index that
+        # nothing has asked for yet, so the UI can say "building" rather than
+        # implying retrieval is broken.
+        return {"ready": False, "building": _build_lock.locked()}
     return {
         "ready": True,
         "nodes": len(_index["names"]),

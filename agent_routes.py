@@ -18,7 +18,7 @@ from typing import Any
 from aiohttp import web
 from server import PromptServer
 
-from . import chat_context, config, llm_client
+from . import chat_context, config, install_index, llm_client
 from .generation import pipeline
 from .knowledge import blueprint_matcher
 
@@ -156,6 +156,74 @@ async def ping(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+@routes.get("/agent/health")
+async def health(request: web.Request) -> web.Response:
+    """Per-service readiness, so a broken setup is visible in the node itself.
+
+    Every failure this reports used to surface only as an opaque mid-build
+    error ("all generation attempts failed") or a console warning the user
+    never sees. `hint` carries the exact command that fixes each problem.
+
+    Always HTTP 200 when authorized: "Ollama is down" is a successful answer
+    to this question, and a non-200 would make the frontend unable to tell a
+    reachable-but-unhealthy backend from an unreachable one.
+    """
+    if not _is_authorized(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    ollama_up = await llm_client.is_available()
+
+    installed: set[str] = set()
+    primary = config.PRIMARY_MODEL
+    fallback = config.FALLBACK_MODEL
+    if ollama_up:
+        installed = await llm_client.list_installed()
+        # The names actually used at run time, after the LoRA-missing and
+        # fallback-chain degradations in resolve_models().
+        primary, fallback = await llm_client.resolve_models()
+        # resolve_models() caches for the process lifetime, so a user who fixes
+        # a missing model after the first resolve would keep being told it is
+        # missing — precisely when this endpoint has to be right. Re-resolve
+        # against the freshly listed models when the cached answer looks stale.
+        if primary not in installed or fallback not in installed:
+            primary, fallback = await llm_client.resolve_models(force=True)
+
+    index_stats = install_index.stats()
+
+    hints: list[str] = []
+    if not ollama_up:
+        hints.append(f"Ollama is not reachable at {config.OLLAMA_HOST} — start it with `ollama serve`.")
+    else:
+        if primary not in installed:
+            hints.append(f"Primary model missing — run `ollama pull {config.BASE_MODEL}`.")
+        if fallback not in installed:
+            hints.append(
+                "No escalation model installed — run "
+                f"`ollama pull {config.FALLBACK_CHAIN[0]}` for better free-form builds."
+            )
+        if config.EMBED_MODEL not in installed:
+            hints.append(
+                f"Embedding model missing — run `ollama pull {config.EMBED_MODEL}` "
+                "for semantic CHAT retrieval (keyword search is used meanwhile)."
+            )
+
+    return web.json_response(
+        {
+            "ollama": ollama_up,
+            "ollama_host": config.OLLAMA_HOST,
+            "primary_model": {"name": primary, "installed": ollama_up and primary in installed},
+            "fallback_model": {"name": fallback, "installed": ollama_up and fallback in installed},
+            "embed_model": {
+                "name": config.EMBED_MODEL,
+                "installed": ollama_up and config.EMBED_MODEL in installed,
+            },
+            "index": index_stats,
+            "blueprints": len(blueprint_matcher.list_blueprints()),
+            "hints": hints,
+        }
+    )
+
+
 def _error_result(detail: str) -> dict:
     return {
         "status_message": "",
@@ -264,8 +332,62 @@ async def _handle_build(body: dict, sid: str | None, build_id: str | None = None
     }
 
 
-async def _handle_unsupported_mode(mode: str) -> dict:
-    return _error_result(f"mode '{mode}' is not implemented yet (see MASTER_PLAN.md Phase 3)")
+async def _handle_superseded_mode(mode: str) -> dict:
+    """EXPLAIN/DEBUG/SUGGEST were superseded by CHAT, which answers all three
+    kinds of question in one conversation (MASTER_PLAN.md Section 3A
+    amendment). They are no longer offered by the node, but a workflow saved
+    before that change can still send one, so the reply names the replacement
+    rather than reading as a missing feature.
+    """
+    return _error_result(
+        f"mode '{mode}' has been replaced by CHAT, which explains nodes, "
+        "diagnoses errors and suggests next steps in one conversation. "
+        "Set mode = CHAT on this node."
+    )
+
+
+async def _handle_modify(body: dict, sid: str | None, build_id: str | None = None) -> dict:
+    """MODIFY mode: edit the workflow already on the canvas.
+
+    Returns a validated diff rather than a workflow. The frontend snapshots
+    the canvas before applying it, so the whole edit is undoable.
+    """
+    async def _progress(message: str) -> None:
+        await _send_progress(sid, message, build_id)
+
+    task_prompt = body.get("task_prompt", "")
+    if not isinstance(task_prompt, str):
+        return _error_result("task_prompt must be a string")
+    if not task_prompt.strip():
+        return _error_result("task_prompt is empty")
+
+    graph = body.get("graph")
+    if not isinstance(graph, dict):
+        return _error_result(
+            "MODIFY needs the current canvas; none was sent with the request"
+        )
+
+    result = await pipeline.modify_workflow(task_prompt, graph, on_progress=_progress)
+    if not result.ok or result.diff is None:
+        await _progress(f"Error: {result.error}")
+        return _error_result(result.error or "modification failed")
+
+    diff = result.diff
+    status = f"Modified: {diff.summary()}"
+    if result.warnings:
+        status += f" - warnings: {'; '.join(result.warnings)}"
+
+    return {
+        "status_message": status,
+        "error_detail": "",
+        "warnings": result.warnings,
+        # Not a workflow: the frontend applies this as an edit, not an
+        # injection, and must not route it through the BUILD spec path.
+        "workflow_json": "{}",
+        "diff": diff.to_dict(),
+        "execution_ready": False,
+        "source": "modify",
+    }
 
 
 _chat_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_CHATS)
@@ -421,8 +543,12 @@ async def build_workflow(request: web.Request) -> web.Response:
                 return web.json_response(
                     _error_result("mode 'CHAT' is served by POST /agent/chat"), status=400
                 )
-            elif mode in ("MODIFY", "EXPLAIN", "DEBUG", "SUGGEST"):
-                result = await _handle_unsupported_mode(mode)
+            elif mode == "MODIFY":
+                result = await _handle_modify(body, sid, build_id)
+            elif mode in ("EXPLAIN", "DEBUG", "SUGGEST"):
+                # Kept in the dispatch though the node no longer offers them:
+                # a workflow saved before they were removed still sends one.
+                result = await _handle_superseded_mode(mode)
             else:
                 return web.json_response({"error": f"unknown mode '{mode}'"}, status=400)
     except llm_client.OllamaUnavailableError as exc:

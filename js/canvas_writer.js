@@ -38,6 +38,42 @@ export function findFreeZone(graph, width = 300, height = 200) {
     return [100, maxOccupiedY + 80];
 }
 
+/**
+ * Serialize the whole graph so an agent action can be undone.
+ *
+ * Taken before any mutation. Returns null if the graph cannot be serialized,
+ * which the caller must treat as "no undo available" rather than proceeding
+ * silently — the point of the snapshot is that the user can always get back.
+ */
+export function snapshotGraph(graph) {
+    try {
+        return graph?.serialize?.() ?? null;
+    } catch (err) {
+        console.warn("[comfy_agent] could not snapshot graph:", err);
+        return null;
+    }
+}
+
+/**
+ * Restore a snapshot taken by snapshotGraph. Returns true on success.
+ *
+ * configure() replaces the graph wholesale, so this reverts every change made
+ * since the snapshot — not only the agent's. That is the honest behaviour for
+ * an "undo the agent's last action" button placed immediately after the
+ * action, and the caller warns when other edits may be caught up in it.
+ */
+export function restoreGraph(app, snapshot) {
+    if (!snapshot) return false;
+    try {
+        app.graph.configure(snapshot);
+        app.graph.setDirtyCanvas(true, true);
+        return true;
+    } catch (err) {
+        console.error("[comfy_agent] graph restore failed:", err);
+        return false;
+    }
+}
+
 export function createNodeSafe(graph, classType) {
     try {
         const node = LiteGraph.createNode(classType);
@@ -132,20 +168,27 @@ function injectBlueprint(graph, spec, originOffset) {
     }
 
     let linkCount = 0;
+    const skippedLinks = [];
     for (const link of spec.links) {
         const [, fromId, fromSlot, toId, toSlot] = link;
         const fromNode = idMap.get(fromId);
         const toNode = idMap.get(toId);
-        if (!fromNode || !toNode) continue; // one side failed to create — skip, don't crash
+        if (!fromNode || !toNode) {
+            // One side failed to create — skip, don't crash. Recorded so the
+            // caller can report it rather than leaving a silently sparser graph.
+            skippedLinks.push(`node ${fromId} -> node ${toId} (node not created)`);
+            continue;
+        }
         try {
             fromNode.connect(fromSlot, toNode, toSlot);
             linkCount += 1;
         } catch (err) {
             console.warn("[comfy_agent] link failed during blueprint injection:", link, err);
+            skippedLinks.push(`node ${fromId} -> node ${toId} (connect failed)`);
         }
     }
 
-    return { createdNodes, failedTypes, linkCount, idMap };
+    return { createdNodes, failedTypes, linkCount, idMap, skippedLinks };
 }
 
 /**
@@ -159,7 +202,11 @@ function injectFreeForm(graph, spec, originOffset) {
     const createdNodes = [];
 
     let col = 0;
-    for (const [instanceId, classType] of Object.entries(spec.node_instances)) {
+    // `|| {}` rather than a bare read: every server error path returns
+    // workflow_json "{}", so a spec with no node_instances at all is reachable.
+    // Object.entries(undefined) throws a TypeError that surfaces as the
+    // unrelated "Error drawing on canvas" instead of the real cause.
+    for (const [instanceId, classType] of Object.entries(spec.node_instances || {})) {
         const node = createNodeSafe(graph, classType);
         if (!node) {
             failedTypes.push(classType);
@@ -179,15 +226,29 @@ function injectFreeForm(graph, spec, originOffset) {
     }
 
     let linkCount = 0;
+    // Links the server asked for that did not make it onto the canvas. These
+    // were previously console-only, so a build reporting "6 nodes, 4 links"
+    // gave no indication that a fifth link was requested and dropped — the
+    // user found out when the workflow failed to queue.
+    const skippedLinks = [];
+    const describe = (link) =>
+        `${link.from_node}[${link.from_output}] -> ${link.to_node}[${link.to_input}]`;
+
     for (const link of spec.links || []) {
         const fromNode = idMap.get(link.from_node);
         const toNode = idMap.get(link.to_node);
-        if (!fromNode || !toNode) continue;
+        if (!fromNode || !toNode) {
+            // The node itself failed to create; already reported via failedTypes.
+            skippedLinks.push(`${describe(link)} (node not created)`);
+            continue;
+        }
 
         const fromSlot = findOutputSlot(fromNode, link.from_output);
         const toSlot = findInputSlot(toNode, link.to_input);
         if (fromSlot < 0 || toSlot < 0) {
+            const which = fromSlot < 0 ? `output '${link.from_output}'` : `input '${link.to_input}'`;
             console.warn("[comfy_agent] slot not found for link:", link);
+            skippedLinks.push(`${describe(link)} (no ${which})`);
             continue;
         }
         try {
@@ -195,10 +256,11 @@ function injectFreeForm(graph, spec, originOffset) {
             linkCount += 1;
         } catch (err) {
             console.warn("[comfy_agent] link failed during free-form injection:", link, err);
+            skippedLinks.push(`${describe(link)} (connect failed)`);
         }
     }
 
-    return { createdNodes, failedTypes, linkCount, idMap };
+    return { createdNodes, failedTypes, linkCount, idMap, skippedLinks };
 }
 
 /** Wrap a set of just-created nodes into a SubgraphNode if over threshold
@@ -289,6 +351,73 @@ export function markIncomplete(idMap, incompleteInputs) {
     return marked;
 }
 
+/**
+ * Apply a MODIFY diff to the live canvas: remove nodes, change widget values,
+ * then add new nodes in a free zone.
+ *
+ * Order matters. Removals run first so the free-zone search sees the space
+ * they release, and widget changes are resolved against the pre-removal graph
+ * so an id that no longer exists is reported rather than silently skipped.
+ *
+ * The caller is expected to have snapshotted the graph first — this deletes
+ * the user's nodes, and every failure mode here is one they will want to undo.
+ */
+export function applyDiff(app, diff) {
+    const graph = app.graph;
+    const applied = { removed: 0, widgetsSet: 0, added: 0, failed: [] };
+
+    const byId = new Map((graph._nodes || []).map((n) => [n.id, n]));
+
+    // Widget changes first, while every referenced node is still present.
+    for (const change of diff.set_widgets || []) {
+        const target = byId.get(change.node_id);
+        if (!target) {
+            applied.failed.push(`widget '${change.widget}' (node ${change.node_id} not found)`);
+            continue;
+        }
+        if (setWidgetValue(target, change.widget, change.value)) {
+            applied.widgetsSet += 1;
+        } else {
+            applied.failed.push(`widget '${change.widget}' on node ${change.node_id}`);
+        }
+    }
+
+    for (const nodeId of diff.remove_node_ids || []) {
+        const target = byId.get(nodeId);
+        if (!target) {
+            applied.failed.push(`remove node ${nodeId} (not found)`);
+            continue;
+        }
+        try {
+            graph.remove(target);
+            applied.removed += 1;
+        } catch (err) {
+            console.warn("[comfy_agent] could not remove node:", nodeId, err);
+            applied.failed.push(`remove node ${nodeId}`);
+        }
+    }
+
+    const addTypes = diff.add_nodes || [];
+    if (addTypes.length) {
+        const [zx, zy] = findFreeZone(graph, addTypes.length * COLUMN_PITCH, ROW_HEIGHT);
+        let col = 0;
+        for (const classType of addTypes) {
+            const node = createNodeSafe(graph, classType);
+            if (!node) {
+                applied.failed.push(`add ${classType}`);
+                continue;
+            }
+            node.pos = [zx + col * COLUMN_PITCH, zy];
+            col += 1;
+            graph.add(node);
+            applied.added += 1;
+        }
+    }
+
+    graph.setDirtyCanvas(true, true);
+    return applied;
+}
+
 export function injectWorkflow(app, spec, subgraphWrapThreshold = 6, incompleteInputs = []) {
     const graph = app.graph;
     const footprint = computeSpecFootprint(spec);
@@ -296,7 +425,7 @@ export function injectWorkflow(app, spec, subgraphWrapThreshold = 6, incompleteI
     const origin = [zx + footprint.shift[0], zy + footprint.shift[1]];
 
     const isBlueprint = Array.isArray(spec.nodes) && Array.isArray(spec.links);
-    const { createdNodes, failedTypes, linkCount, idMap } = isBlueprint
+    const { createdNodes, failedTypes, linkCount, idMap, skippedLinks } = isBlueprint
         ? injectBlueprint(graph, spec, origin)
         : injectFreeForm(graph, spec, origin);
 
@@ -319,5 +448,10 @@ export function injectWorkflow(app, spec, subgraphWrapThreshold = 6, incompleteI
         linkCount,
         failedTypes,
         incompleteCount,
+        skippedLinks,
+        // LiteGraph assigns ids on graph.add(), so these are only meaningful
+        // after injection. Used to attribute a later execution error to this
+        // build rather than to unrelated nodes on the canvas.
+        createdNodeIds: createdNodes.map((n) => n.id),
     };
 }

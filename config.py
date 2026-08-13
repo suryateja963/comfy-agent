@@ -148,6 +148,15 @@ OLLAMA_NUM_CTX = 8192
 # are both safe steps down, and retrieval means answers barely change.
 OLLAMA_CHAT_NUM_CTX = 65536
 
+# --- Logging ---
+# Level for the "comfy_agent" logger tree. DEBUG additionally logs each stage's
+# full prompt and response, which are large but are the only way to see what a
+# stage actually received when its output looks wrong.
+#
+# Set to None to leave the logger alone and inherit whatever ComfyUI has
+# configured — the right choice if you manage log levels centrally.
+LOG_LEVEL = "INFO"
+
 COMFY_HOST = "http://127.0.0.1:8188"
 COMFY_TIMEOUT_SECONDS = 5.0
 

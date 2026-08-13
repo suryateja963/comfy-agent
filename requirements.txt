@@ -1,0 +1,9 @@
+# Kept in sync with [project].dependencies in pyproject.toml.
+#
+# Both files exist on purpose: the Comfy Registry reads pyproject.toml, while
+# several ComfyUI Manager versions only look for requirements.txt and will
+# install nothing without it.
+#
+# ComfyUI already ships aiohttp, so this is normally a no-op — it is declared
+# because an undeclared import disappears on a clean install.
+aiohttp>=3.9

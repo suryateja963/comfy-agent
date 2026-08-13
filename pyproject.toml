@@ -14,10 +14,17 @@ requires-python = ">=3.10"
 # a custom node that must install cleanly inside someone else's ComfyUI.
 dependencies = ["aiohttp>=3.9"]
 
+[project.urls]
+# The Registry reads the repository URL from here. Update if you fork or move
+# the project — a wrong URL publishes fine and then sends users nowhere.
+Repository = "https://github.com/suryateja963/comfy-agent"
+
 [tool.comfy]
 # PublisherId must be set to your ComfyUI Registry publisher handle before
 # `comfy node publish` will succeed — it is the one field the Registry
-# rejects when empty. Icon is optional (a URL to a square PNG/SVG).
+# rejects when empty. Deliberately left blank: it is an account handle, not
+# something that can be guessed correctly. Icon is optional (a URL to a
+# square PNG/SVG).
 PublisherId = ""
 DisplayName = "Comfy Agent"
 Icon = ""

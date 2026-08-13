@@ -1,0 +1,62 @@
+{
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "ComfyAgent",
+      "pos": [
+        100,
+        100
+      ],
+      "size": [
+        400,
+        320
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "status_message",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "error_detail",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "workflow_json",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "execution_ready",
+          "type": "BOOLEAN",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComfyAgent"
+      },
+      "widgets_values": [
+        "a photorealistic portrait, sdxl",
+        "BUILD",
+        "auto",
+        "auto",
+        12,
+        true
+      ]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "comfy_agent_example": "Press 'Build Workflow'. Matches the txt2img_sdxl blueprint, so it builds instantly with no LLM call and works even with Ollama stopped."
+  },
+  "version": 0.4
+}
