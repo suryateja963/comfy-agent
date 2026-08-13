@@ -1,0 +1,118 @@
+/* comfy_agent styles.
+ *
+ * The status widget is created with node.addWidget("text", ...), which does
+ * not accept a CSS class. The CHAT panel is a DOM widget, so it can be styled
+ * properly — everything below targets it.
+ *
+ * Colours come from ComfyUI's own CSS variables with literal fallbacks, so the
+ * panel follows the user's theme instead of hardcoding a dark palette.
+ */
+
+.comfy-agent-chat {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    height: 100%;
+    min-height: 220px;
+    box-sizing: border-box;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12px;
+    color: var(--input-text, #ddd);
+}
+
+.comfy-agent-chat-log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--comfy-input-bg, #1a1a1a);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    /* Without this the flex child refuses to shrink and the log grows the
+       node instead of scrolling. */
+    min-height: 0;
+}
+
+.comfy-agent-chat-msg {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.comfy-agent-chat-role {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.6;
+}
+
+.comfy-agent-chat-text {
+    /* Preserve model formatting (lists, code) but still wrap long lines and
+       break unbroken tokens like file paths rather than overflowing. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    line-height: 1.45;
+    padding: 5px 7px;
+    border-radius: 4px;
+}
+
+.comfy-agent-chat-user .comfy-agent-chat-text {
+    background: var(--comfy-menu-bg, #353535);
+}
+
+.comfy-agent-chat-assistant .comfy-agent-chat-text {
+    background: transparent;
+    padding-left: 0;
+}
+
+.comfy-agent-chat-error {
+    color: var(--error-text, #ff6b6b);
+}
+
+.comfy-agent-chat-input-row {
+    display: flex;
+    gap: 6px;
+    flex: 0 0 auto;
+    align-items: stretch;
+}
+
+.comfy-agent-chat-input {
+    flex: 1 1 auto;
+    resize: none;
+    box-sizing: border-box;
+    padding: 5px 7px;
+    font: inherit;
+    color: var(--input-text, #ddd);
+    background: var(--comfy-input-bg, #1a1a1a);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+}
+
+.comfy-agent-chat-input:focus {
+    outline: 1px solid var(--border-color, #666);
+}
+
+.comfy-agent-chat-send {
+    flex: 0 0 auto;
+    min-width: 54px;
+    padding: 0 10px;
+    cursor: pointer;
+    font: inherit;
+    color: var(--input-text, #ddd);
+    background: var(--comfy-menu-bg, #353535);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+}
+
+.comfy-agent-chat-send:hover:not(:disabled) {
+    filter: brightness(1.25);
+}
+
+.comfy-agent-chat-send:disabled {
+    opacity: 0.5;
+    cursor: default;
+}

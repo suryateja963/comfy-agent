@@ -1,0 +1,30 @@
+[project]
+name = "comfy_agent"
+version = "0.0.1"
+description = "Meta-node: builds ComfyUI workflows from natural language on the canvas, and answers questions about your install."
+license = { text = "MIT" }
+requires-python = ">=3.10"
+# aiohttp is imported by llm_client.py, agent_routes.py, install_index.py and
+# knowledge/schema_compactor.py. ComfyUI already ships it, but an undeclared
+# import disappears on a clean install.
+#
+# Nothing else is needed: the CHAT install index deliberately uses stdlib-only
+# math for cosine similarity rather than pulling in numpy. At 1767 nodes the
+# pure-Python scan is fast enough, and a native dependency is a poor trade for
+# a custom node that must install cleanly inside someone else's ComfyUI.
+dependencies = ["aiohttp>=3.9"]
+
+[tool.comfy]
+# PublisherId must be set to your ComfyUI Registry publisher handle before
+# `comfy node publish` will succeed — it is the one field the Registry
+# rejects when empty. Icon is optional (a URL to a square PNG/SVG).
+PublisherId = ""
+DisplayName = "Comfy Agent"
+Icon = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The suites build their package tree by hand (ComfyUI's comfy_api/server are
+# not importable outside a running install), so no conftest or rootdir magic
+# is needed.
+addopts = "-q"

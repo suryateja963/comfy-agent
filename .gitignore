@@ -1,0 +1,21 @@
+# Generated at runtime: ~18MB of node embeddings, rebuilt automatically
+# when the installed node set changes (see install_index.py).
+install_index.cache.json
+*.cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local overrides — config.py is committed, but a machine-specific copy is not
+config.local.py
