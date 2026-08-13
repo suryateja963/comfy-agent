@@ -581,13 +581,21 @@ workflow JSON, drop it in `blueprint_defs/<name>.json`, and add its trigger
 keywords to `BLUEPRINT_KEYWORDS` in `blueprint_matcher.py`. No Python
 changes needed.
 
-**Add a mode:** `MODIFY`/`EXPLAIN`/`DEBUG`/`SUGGEST` are wired into
+**Add a mode:** `EXPLAIN`/`DEBUG`/`SUGGEST` are wired into
 `agent_routes.py`'s dispatch but currently return "not implemented yet" —
 each needs a handler function following the same shape as `_handle_build`.
-The canvas state they need is no longer missing: CHAT already receives a
-serialized graph on every request and `chat_context.render_graph_block()`
-trims it to the parts worth reasoning over, so a `MODIFY` handler can reuse
-that rather than rebuilding it. Note that `CHAT` is dispatched by its own
+The canvas state they need is not missing: the frontend serializes the graph
+on every CHAT and MODIFY request, so a new handler can reuse that rather than
+rebuilding it.
+
+`MODIFY` is implemented and is the worked example to copy. It follows a
+different shape from `_handle_build` on purpose: `generation/stage_m_modify.py`
+returns a *diff* (`add_nodes` / `remove_node_ids` / `set_widgets`) validated
+against the live canvas ids and the installed registry, and the response
+carries `diff` instead of a `workflow_json` spec. The frontend snapshots the
+graph (`canvas_writer.snapshotGraph`) before calling `applyDiff`, which is
+what makes the edit undoable — mandatory for any mode that mutates existing
+user work rather than adding to empty space. Note that `CHAT` is dispatched by its own
 route (`/agent/chat`) rather than through `build_workflow`, because the build
 response shape cannot carry a token stream.
 
