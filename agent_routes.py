@@ -336,6 +336,50 @@ async def _handle_unsupported_mode(mode: str) -> dict:
     return _error_result(f"mode '{mode}' is not implemented yet (see MASTER_PLAN.md Phase 3)")
 
 
+async def _handle_modify(body: dict, sid: str | None, build_id: str | None = None) -> dict:
+    """MODIFY mode: edit the workflow already on the canvas.
+
+    Returns a validated diff rather than a workflow. The frontend snapshots
+    the canvas before applying it, so the whole edit is undoable.
+    """
+    async def _progress(message: str) -> None:
+        await _send_progress(sid, message, build_id)
+
+    task_prompt = body.get("task_prompt", "")
+    if not isinstance(task_prompt, str):
+        return _error_result("task_prompt must be a string")
+    if not task_prompt.strip():
+        return _error_result("task_prompt is empty")
+
+    graph = body.get("graph")
+    if not isinstance(graph, dict):
+        return _error_result(
+            "MODIFY needs the current canvas; none was sent with the request"
+        )
+
+    result = await pipeline.modify_workflow(task_prompt, graph, on_progress=_progress)
+    if not result.ok or result.diff is None:
+        await _progress(f"Error: {result.error}")
+        return _error_result(result.error or "modification failed")
+
+    diff = result.diff
+    status = f"Modified: {diff.summary()}"
+    if result.warnings:
+        status += f" - warnings: {'; '.join(result.warnings)}"
+
+    return {
+        "status_message": status,
+        "error_detail": "",
+        "warnings": result.warnings,
+        # Not a workflow: the frontend applies this as an edit, not an
+        # injection, and must not route it through the BUILD spec path.
+        "workflow_json": "{}",
+        "diff": diff.to_dict(),
+        "execution_ready": False,
+        "source": "modify",
+    }
+
+
 _chat_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_CHATS)
 
 VALID_CHAT_ROLES = ("user", "assistant")
@@ -489,7 +533,9 @@ async def build_workflow(request: web.Request) -> web.Response:
                 return web.json_response(
                     _error_result("mode 'CHAT' is served by POST /agent/chat"), status=400
                 )
-            elif mode in ("MODIFY", "EXPLAIN", "DEBUG", "SUGGEST"):
+            elif mode == "MODIFY":
+                result = await _handle_modify(body, sid, build_id)
+            elif mode in ("EXPLAIN", "DEBUG", "SUGGEST"):
                 result = await _handle_unsupported_mode(mode)
             else:
                 return web.json_response({"error": f"unknown mode '{mode}'"}, status=400)
