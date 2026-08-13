@@ -28,10 +28,15 @@ What exists:
   `NODE_CLASS_MAPPINGS`** — the real loader in `nodes.py` checks for it
   before `comfy_entrypoint` and short-circuits if present (even as `{}`),
   so the V3 path would never run.
-- `agent_routes.py` — `/agent/ping`, `/agent/build_workflow` (BUILD mode:
-  blueprint-first, falls back to free-form), `/agent/chat` (CHAT mode).
-  MODIFY/EXPLAIN/DEBUG/SUGGEST are wired into the dispatch but return
-  "not implemented yet" (Phase 3, Section 5).
+- `agent_routes.py` — `/agent/ping`, `/agent/health`, `/agent/build_workflow`
+  (BUILD mode: blueprint-first, falls back to free-form), `/agent/chat`
+  (CHAT mode). MODIFY/EXPLAIN/DEBUG/SUGGEST are wired into the dispatch but
+  return "not implemented yet" (Phase 3, Section 5).
+- `/agent/health` reports what is actually working — Ollama reachability, the
+  primary/fallback/embed models, index readiness and blueprint count — with
+  the exact `ollama pull` command for anything missing. The node calls it on
+  creation and shows the first blocking problem in its status widget, so a
+  missing model is visible before a build fails rather than after.
 - **CHAT mode** — free-text Q&A about ComfyUI, *this* installation, the user's
   own graph, and execution errors, rendered in a DOM panel on the node itself.
   Selecting `mode = CHAT` swaps the Build button for the chat panel.
