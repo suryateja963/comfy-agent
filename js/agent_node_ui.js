@@ -31,13 +31,34 @@ function setStatus(node, text) {
     app.graph.setDirtyCanvas(true, true);
 }
 
-async function pingOllamaCheck() {
+/**
+ * Ask the server what is actually working. Returns null if health itself is
+ * unreachable (older server, or ComfyUI still starting), which the caller
+ * treats as "say nothing" rather than as a failure to report.
+ */
+async function fetchHealth() {
     try {
-        const resp = await api.fetchApi("/agent/ping");
-        return resp.status === 200;
+        const resp = await api.fetchApi("/agent/health");
+        if (!resp.ok) return null;
+        return await resp.json();
     } catch {
-        return false;
+        return null;
     }
+}
+
+/**
+ * One status line describing the first real problem, with the command that
+ * fixes it. The server already ranks hints most-blocking-first, so leading
+ * with hints[0] avoids burying "Ollama is down" under a note about the embed
+ * model. Blueprint builds need no Ollama at all, so an Ollama problem is
+ * reported as a limitation rather than as a dead node.
+ */
+function healthSummary(health) {
+    if (!health) return null;
+    const hints = Array.isArray(health.hints) ? health.hints : [];
+    if (!hints.length) return null;
+    if (!health.ollama) return `${hints[0]} Blueprint builds still work.`;
+    return hints[0];
 }
 
 async function triggerBuild(node) {
@@ -297,8 +318,16 @@ app.registerExtension({
 
         applyMode();
 
-        pingOllamaCheck().then((ok) => {
-            if (!ok) setStatus(node, "Ollama not detected at startup — blueprint mode will still work.");
+        // Report a broken setup in the node itself. The same information is
+        // logged server-side, but only on first use and only to a console the
+        // user is unlikely to be reading when the build fails.
+        fetchHealth().then((health) => {
+            const summary = healthSummary(health);
+            // Only overwrite a still-idle node: a build started before health
+            // returned must keep its own status.
+            if (summary && node.comfyAgentStatusWidget?.value === "Idle.") {
+                setStatus(node, summary);
+            }
         });
     },
 });
