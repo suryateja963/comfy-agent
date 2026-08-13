@@ -28,4 +28,46 @@ try:
 except Exception:  # noqa: BLE001
     logger.exception("comfy_agent: failed to register routes")
 
+
+# Held on the module so the warm task is not garbage-collected mid-run:
+# asyncio keeps only a weak reference to running tasks.
+_index_warm_task = None
+
+
+def _schedule_index_warm() -> None:
+    """Start the semantic index build in the background once the server runs.
+
+    Built lazily, the 1767-node index build runs inside the first CHAT request
+    and blocks it for the whole build. Warming needs the loop ComfyUI actually
+    runs, which does not exist at import time — and `get_event_loop()` outside
+    a running loop returns a *different*, never-run loop, so scheduling there
+    would silently never fire. aiohttp's on_startup signal is the hook that
+    runs on the right loop.
+
+    Any failure here leaves build()'s lazy path in place, so the worst case is
+    the behaviour we had before rather than a broken node.
+    """
+    import asyncio
+
+    from server import PromptServer
+
+    from . import install_index
+
+    async def _on_startup(_app) -> None:
+        global _index_warm_task
+        _index_warm_task = asyncio.create_task(install_index.warm())
+
+    app = getattr(PromptServer.instance, "app", None)
+    if app is None or not hasattr(app, "on_startup"):
+        logger.debug("comfy_agent: no aiohttp app to hook; index will build lazily")
+        return
+    app.on_startup.append(_on_startup)
+
+
+try:
+    _schedule_index_warm()
+except Exception:  # noqa: BLE001
+    # Warming is an optimisation; never let it stop the node from loading.
+    logger.debug("comfy_agent: could not schedule index warm", exc_info=True)
+
 __all__ = ["comfy_entrypoint", "WEB_DIRECTORY"]
