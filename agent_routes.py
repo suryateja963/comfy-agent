@@ -18,7 +18,7 @@ from typing import Any
 from aiohttp import web
 from server import PromptServer
 
-from . import chat_context, config, llm_client
+from . import chat_context, config, install_index, llm_client
 from .generation import pipeline
 from .knowledge import blueprint_matcher
 
@@ -154,6 +154,74 @@ async def ping(request: web.Request) -> web.Response:
     if not _is_authorized(request):
         return web.json_response({"error": "forbidden"}, status=403)
     return web.json_response({"status": "ok"})
+
+
+@routes.get("/agent/health")
+async def health(request: web.Request) -> web.Response:
+    """Per-service readiness, so a broken setup is visible in the node itself.
+
+    Every failure this reports used to surface only as an opaque mid-build
+    error ("all generation attempts failed") or a console warning the user
+    never sees. `hint` carries the exact command that fixes each problem.
+
+    Always HTTP 200 when authorized: "Ollama is down" is a successful answer
+    to this question, and a non-200 would make the frontend unable to tell a
+    reachable-but-unhealthy backend from an unreachable one.
+    """
+    if not _is_authorized(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    ollama_up = await llm_client.is_available()
+
+    installed: set[str] = set()
+    primary = config.PRIMARY_MODEL
+    fallback = config.FALLBACK_MODEL
+    if ollama_up:
+        installed = await llm_client.list_installed()
+        # The names actually used at run time, after the LoRA-missing and
+        # fallback-chain degradations in resolve_models().
+        primary, fallback = await llm_client.resolve_models()
+        # resolve_models() caches for the process lifetime, so a user who fixes
+        # a missing model after the first resolve would keep being told it is
+        # missing — precisely when this endpoint has to be right. Re-resolve
+        # against the freshly listed models when the cached answer looks stale.
+        if primary not in installed or fallback not in installed:
+            primary, fallback = await llm_client.resolve_models(force=True)
+
+    index_stats = install_index.stats()
+
+    hints: list[str] = []
+    if not ollama_up:
+        hints.append(f"Ollama is not reachable at {config.OLLAMA_HOST} — start it with `ollama serve`.")
+    else:
+        if primary not in installed:
+            hints.append(f"Primary model missing — run `ollama pull {config.BASE_MODEL}`.")
+        if fallback not in installed:
+            hints.append(
+                "No escalation model installed — run "
+                f"`ollama pull {config.FALLBACK_CHAIN[0]}` for better free-form builds."
+            )
+        if config.EMBED_MODEL not in installed:
+            hints.append(
+                f"Embedding model missing — run `ollama pull {config.EMBED_MODEL}` "
+                "for semantic CHAT retrieval (keyword search is used meanwhile)."
+            )
+
+    return web.json_response(
+        {
+            "ollama": ollama_up,
+            "ollama_host": config.OLLAMA_HOST,
+            "primary_model": {"name": primary, "installed": ollama_up and primary in installed},
+            "fallback_model": {"name": fallback, "installed": ollama_up and fallback in installed},
+            "embed_model": {
+                "name": config.EMBED_MODEL,
+                "installed": ollama_up and config.EMBED_MODEL in installed,
+            },
+            "index": index_stats,
+            "blueprints": len(blueprint_matcher.list_blueprints()),
+            "hints": hints,
+        }
+    )
 
 
 def _error_result(detail: str) -> dict:
