@@ -142,8 +142,17 @@ export function createChatPanel(app, node) {
         }
     }
 
-    sendBtn.addEventListener("click", send);
-    input.addEventListener("keydown", (event) => {
+    // Tracked so destroy() can detach them. Removing a node and adding another
+    // otherwise leaves the old panel's handlers attached to DOM that is still
+    // reachable through the closures below.
+    const listeners = [];
+    function on(target, type, handler) {
+        target.addEventListener(type, handler);
+        listeners.push([target, type, handler]);
+    }
+
+    on(sendBtn, "click", send);
+    on(input, "keydown", (event) => {
         // Enter sends; Shift+Enter newlines. Stop propagation either way so
         // LiteGraph's canvas keybindings don't also act on the keystroke.
         if (event.key === "Enter" && !event.shiftKey) {
@@ -154,13 +163,27 @@ export function createChatPanel(app, node) {
     });
     // Typing in a node must not trigger canvas shortcuts (delete node, etc.).
     for (const evt of ["keydown", "keyup", "keypress"]) {
-        input.addEventListener(evt, (e) => e.stopPropagation());
+        on(input, evt, (e) => e.stopPropagation());
     }
 
     renderHistory();
 
-    return { root, renderHistory, clear() {
-        node.comfyAgentChatHistory = [];
-        renderHistory();
-    } };
+    return {
+        root,
+        renderHistory,
+        clear() {
+            node.comfyAgentChatHistory = [];
+            renderHistory();
+        },
+        /** Detach every listener and drop the streaming callback. Called from
+         *  the node's onRemoved so a deleted node leaves nothing behind. */
+        destroy() {
+            for (const [target, type, handler] of listeners) {
+                target.removeEventListener(type, handler);
+            }
+            listeners.length = 0;
+            node.comfyAgentOnChatToken = null;
+            log.replaceChildren();
+        },
+    };
 }
