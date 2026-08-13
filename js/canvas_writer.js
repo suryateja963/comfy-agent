@@ -159,7 +159,11 @@ function injectFreeForm(graph, spec, originOffset) {
     const createdNodes = [];
 
     let col = 0;
-    for (const [instanceId, classType] of Object.entries(spec.node_instances)) {
+    // `|| {}` rather than a bare read: every server error path returns
+    // workflow_json "{}", so a spec with no node_instances at all is reachable.
+    // Object.entries(undefined) throws a TypeError that surfaces as the
+    // unrelated "Error drawing on canvas" instead of the real cause.
+    for (const [instanceId, classType] of Object.entries(spec.node_instances || {})) {
         const node = createNodeSafe(graph, classType);
         if (!node) {
             failedTypes.push(classType);
