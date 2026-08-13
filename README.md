@@ -31,8 +31,9 @@ What exists:
 - `agent_routes.py` — `/agent/ping`, `/agent/health`, `/agent/build_workflow`
   (BUILD mode: blueprint-first, falls back to free-form), `/agent/chat`
   (CHAT mode), `/agent/build_workflow` with `mode = MODIFY` (edits the
-  workflow already on the canvas). EXPLAIN/DEBUG/SUGGEST are wired into the
-  dispatch but return "not implemented yet" (Phase 3, Section 5).
+  workflow already on the canvas). EXPLAIN/DEBUG/SUGGEST were superseded by
+  CHAT and are no longer offered by the node; the dispatch still accepts them
+  so an older saved workflow gets a message naming the replacement.
 - **MODIFY mode** — edits the current canvas instead of building a new
   workflow. Returns a *diff* (nodes to add, nodes to remove, widget values to
   change), every part validated against the real canvas ids and the installed
