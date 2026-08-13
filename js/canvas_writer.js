@@ -38,6 +38,42 @@ export function findFreeZone(graph, width = 300, height = 200) {
     return [100, maxOccupiedY + 80];
 }
 
+/**
+ * Serialize the whole graph so an agent action can be undone.
+ *
+ * Taken before any mutation. Returns null if the graph cannot be serialized,
+ * which the caller must treat as "no undo available" rather than proceeding
+ * silently — the point of the snapshot is that the user can always get back.
+ */
+export function snapshotGraph(graph) {
+    try {
+        return graph?.serialize?.() ?? null;
+    } catch (err) {
+        console.warn("[comfy_agent] could not snapshot graph:", err);
+        return null;
+    }
+}
+
+/**
+ * Restore a snapshot taken by snapshotGraph. Returns true on success.
+ *
+ * configure() replaces the graph wholesale, so this reverts every change made
+ * since the snapshot — not only the agent's. That is the honest behaviour for
+ * an "undo the agent's last action" button placed immediately after the
+ * action, and the caller warns when other edits may be caught up in it.
+ */
+export function restoreGraph(app, snapshot) {
+    if (!snapshot) return false;
+    try {
+        app.graph.configure(snapshot);
+        app.graph.setDirtyCanvas(true, true);
+        return true;
+    } catch (err) {
+        console.error("[comfy_agent] graph restore failed:", err);
+        return false;
+    }
+}
+
 export function createNodeSafe(graph, classType) {
     try {
         const node = LiteGraph.createNode(classType);
