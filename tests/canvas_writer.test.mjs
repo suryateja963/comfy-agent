@@ -11,6 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+    applyDiff,
     findFreeZone,
     injectWorkflow,
     restoreGraph,
@@ -61,6 +62,10 @@ function makeApp(existingNodes = []) {
             // being entirely undefined.
             if (n.id === undefined) n.id = this._nextId++;
             this._nodes.push(n);
+        },
+        remove(n) {
+            const i = this._nodes.indexOf(n);
+            if (i >= 0) this._nodes.splice(i, 1);
         },
         setDirtyCanvas() {},
         // Mirrors LiteGraph's save/load pair closely enough to test the
@@ -304,6 +309,78 @@ test("a link naming a slot that does not exist is reported as skipped", () => {
     assert.equal(result.linkCount, 0);
     assert.equal(result.skippedLinks.length, 1);
     assert.match(result.skippedLinks[0], /nonexistent/);
+});
+
+test("applyDiff removes, edits and adds in one pass", () => {
+    installLiteGraph();
+    const app = makeApp();
+    // Two real nodes to edit against.
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler", save_1: "SaveImage" }, widgets: {}, links: [] },
+        99, // above the wrap threshold check, so nothing is collapsed
+    );
+    const [ks, save] = app.graph._nodes;
+
+    const outcome = applyDiff(app, {
+        add_nodes: ["SaveImage"],
+        remove_node_ids: [save.id],
+        set_widgets: [{ node_id: ks.id, widget: "steps", value: 42 }],
+    });
+
+    assert.equal(outcome.removed, 1);
+    assert.equal(outcome.widgetsSet, 1);
+    assert.equal(outcome.added, 1);
+    assert.deepEqual(outcome.failed, []);
+    assert.equal(ks.widgets.find((w) => w.name === "steps").value, 42);
+    assert.ok(!app.graph._nodes.includes(save), "the removed node is off the canvas");
+});
+
+test("applyDiff edits widgets before removals take effect", () => {
+    // A diff that edits and removes different nodes must not lose the edit
+    // because the removal reindexed the graph first.
+    installLiteGraph();
+    const app = makeApp();
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler", save_1: "SaveImage" }, widgets: {}, links: [] },
+        99,
+    );
+    const [ks, save] = app.graph._nodes;
+
+    const outcome = applyDiff(app, {
+        add_nodes: [],
+        remove_node_ids: [save.id],
+        set_widgets: [{ node_id: ks.id, widget: "cfg", value: 7.5 }],
+    });
+    assert.equal(outcome.widgetsSet, 1);
+    assert.equal(ks.widgets.find((w) => w.name === "cfg").value, 7.5);
+});
+
+test("applyDiff reports edits it could not apply instead of throwing", () => {
+    installLiteGraph();
+    const app = makeApp();
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler" }, widgets: {}, links: [] },
+        99,
+    );
+    const outcome = applyDiff(app, {
+        add_nodes: [],
+        remove_node_ids: [9999],
+        set_widgets: [{ node_id: 9999, widget: "steps", value: 1 }],
+    });
+    assert.equal(outcome.removed, 0);
+    assert.equal(outcome.widgetsSet, 0);
+    assert.equal(outcome.failed.length, 2);
+});
+
+test("applyDiff on an empty diff changes nothing", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    const outcome = applyDiff(app, { add_nodes: [], remove_node_ids: [], set_widgets: [] });
+    assert.deepEqual(outcome, { removed: 0, widgetsSet: 0, added: 0, failed: [] });
+    assert.equal(app.graph._nodes.length, 1);
 });
 
 test("a snapshot taken before injection restores the original canvas", () => {
