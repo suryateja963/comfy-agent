@@ -308,9 +308,63 @@ def is_ready() -> bool:
     return _index is not None
 
 
+# Set once the first successful build finishes, so a caller can distinguish
+# "still warming" from "built" without racing the build lock.
+_ready_event: asyncio.Event | None = None
+
+
+def ready_event() -> asyncio.Event:
+    """Signalled when the index is usable.
+
+    Created lazily rather than at import: asyncio.Event binds to the running
+    loop on first await in older Python versions, and this module is imported
+    long before ComfyUI's loop exists.
+    """
+    global _ready_event
+    if _ready_event is None:
+        _ready_event = asyncio.Event()
+    if _index is not None:
+        _ready_event.set()
+    return _ready_event
+
+
+async def warm(retry_delay: float = 5.0, max_attempts: int = 3) -> None:
+    """Build the index in the background, once the server can answer.
+
+    Without this the 1767-node build ran inside the first CHAT request, which
+    blocked that request for the full build. Retries because this starts with
+    ComfyUI itself: /object_info is not served for the first moments after
+    launch, and a single failed attempt would leave every later chat paying
+    the cost this function exists to remove.
+    """
+    event = ready_event()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await build()
+            event.set()
+            logger.info("install index warm complete (%s)", stats())
+            return
+        except Exception as exc:  # noqa: BLE001
+            if attempt == max_attempts:
+                # Not fatal: retrieval degrades to keyword scoring, and the
+                # next chat request rebuilds via build()'s own lazy path.
+                logger.warning(
+                    "install index warm failed after %d attempts (%s); "
+                    "retrieval will degrade to keyword search",
+                    max_attempts,
+                    exc,
+                )
+                return
+            logger.debug("index warm attempt %d failed (%s); retrying", attempt, exc)
+            await asyncio.sleep(retry_delay)
+
+
 def stats() -> dict[str, Any]:
     if _index is None:
-        return {"ready": False}
+        # `building` distinguishes a warm already in flight from an index that
+        # nothing has asked for yet, so the UI can say "building" rather than
+        # implying retrieval is broken.
+        return {"ready": False, "building": _build_lock.locked()}
     return {
         "ready": True,
         "nodes": len(_index["names"]),
