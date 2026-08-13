@@ -23,6 +23,7 @@ from typing import Any
 
 from .. import llm_client
 from ..knowledge.type_validator import is_widget_input
+from .stage_b_configure import _coerce as coerce_widget_value
 
 logger = logging.getLogger("comfy_agent.generation.stage_m")
 
@@ -38,7 +39,10 @@ SCHEMA = {
                 "properties": {
                     "node_id": {"type": "integer"},
                     "widget": {"type": "string"},
-                    "value": {},
+                    # Constrained to scalars: an unconstrained `{}` let every
+                    # model size return the value wrapped in a descriptor
+                    # object ({"i": 35}) instead of the value itself.
+                    "value": {"type": ["string", "number", "integer", "boolean"]},
                 },
                 "required": ["node_id", "widget", "value"],
             },
@@ -57,10 +61,19 @@ SYSTEM = (
     "2. remove_node_ids: numeric ids of nodes to delete, copied exactly from "
     "the canvas list. Empty if nothing needs removing.\n"
     "3. set_widgets: widget values to change on nodes that stay, as "
-    "{node_id, widget, value}. Empty if no values change.\n"
+    "{node_id, widget, value}. Empty if no values change. 'value' must be the "
+    "bare new value itself - the number 35, not {\"i\": 35} and not an object "
+    "describing the widget.\n"
+    "Changing a value NEVER requires removing or re-adding a node: to change "
+    "steps, emit one set_widgets entry and leave add_nodes and "
+    "remove_node_ids empty.\n"
     "Change ONLY what the request asks for. Do not remove a node just because "
     "you are adding one. Do not restate unchanged values. Output ONLY the "
-    "JSON object."
+    "JSON object.\n\n"
+    "Example - given canvas 'id=1 type=KSampler' and the request 'set steps "
+    "to 30', the correct and complete answer is: "
+    '{"add_nodes": [], "remove_node_ids": [], '
+    '"set_widgets": [{"node_id": 1, "widget": "steps", "value": 30}]}'
 )
 
 
@@ -212,13 +225,53 @@ def validate_diff(
         target = (node_id, widget)
         if target in seen_targets:
             continue  # last-write-wins would be arbitrary; keep the first
+
+        raw_value = entry.get("value")
+        # Observed on every model size, including the 9B: the value arrives
+        # wrapped in an object describing the widget rather than as the value
+        # itself — {"i": 35}, {"default_value": 20, "type": "int", ...}. A
+        # widget holds a scalar, so a container is always wrong here, and
+        # writing one to the canvas produces a node that looks configured and
+        # cannot run.
+        if isinstance(raw_value, (dict, list)):
+            rejected.append(
+                f"set '{widget}' on {node_id} (value must be a scalar, got {type(raw_value).__name__})"
+            )
+            continue
+
+        # Same coercion Stage B applies: type-cast, clamp INT/FLOAT to the
+        # declared range, and validate COMBO values against the real options.
+        coerced = coerce_widget_value(raw_value, schema.get(nodes[node_id], {}), widget)
+        if coerced is None:
+            rejected.append(f"set '{widget}' on {node_id} (value {raw_value!r} is not valid for this widget)")
+            continue
+
         seen_targets.add(target)
-        set_widgets.append({"node_id": node_id, "widget": widget, "value": entry.get("value")})
+        set_widgets.append({"node_id": node_id, "widget": widget, "value": coerced})
 
     if rejected:
         logger.info("stage M rejected %d proposed edit(s): %s", len(rejected), rejected)
 
     return ModifyDiff(add_nodes, remove_ids, set_widgets, rejected)
+
+
+# A removal touching more than this share of the canvas is treated as
+# suspicious rather than intentional. Deliberately loose: deleting one node of
+# three is a legitimate edit, deleting two of three to change a widget value
+# is the observed small-model failure.
+DESTRUCTIVE_REMOVAL_RATIO = 0.5
+
+
+def _is_implausibly_destructive(diff: ModifyDiff, nodes: dict[int, str]) -> bool:
+    """True when a diff deletes a large share of the canvas.
+
+    Only ever used to trigger a second opinion, never to reject outright: a
+    user really can ask for most of their workflow to be removed, and this
+    heuristic cannot tell that apart from a model that lost the plot.
+    """
+    if not diff.remove_node_ids or not nodes:
+        return False
+    return len(diff.remove_node_ids) / len(nodes) > DESTRUCTIVE_REMOVAL_RATIO
 
 
 async def generate_diff(
@@ -242,5 +295,32 @@ async def generate_diff(
         raise StageMError(f"MODIFY generation failed: {exc}") from exc
 
     diff = validate_diff(result, nodes, schema)
+
+    # Escalate wholesale deletion rather than applying it. Measured against a
+    # live Ollama: asked only to change a widget value, the 0.8B proposed
+    # deleting two of three canvas nodes, while the 4B and 9B returned exactly
+    # the one widget change. Every id it named was real, so no amount of
+    # validation catches this - the check has to be on the *shape* of the edit.
+    primary, fallback = await llm_client.resolve_models()
+    if (
+        _is_implausibly_destructive(diff, nodes)
+        and model_used == primary
+        and fallback != primary
+    ):
+        logger.info(
+            "stage M: %s proposed removing %d of %d node(s); re-asking %s",
+            model_used, len(diff.remove_node_ids), len(nodes), fallback,
+        )
+        try:
+            escalated = await llm_client.generate_json(
+                prompt=prompt, schema=SCHEMA, model=fallback, system=SYSTEM
+            )
+            candidate = validate_diff(escalated, nodes, schema)
+            if not _is_implausibly_destructive(candidate, nodes) and not candidate.is_empty:
+                diff = candidate
+                model_used = fallback
+        except llm_client.OllamaGenerationError as exc:
+            logger.info("stage M escalation failed, keeping the original diff: %s", exc)
+
     logger.info("stage M (%s): %s", model_used, diff.summary())
     return diff
