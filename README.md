@@ -283,8 +283,8 @@ conversations and large graphs, not for typical questions.
 ### 5. Run the tests
 
 ```bash
-pytest tests/                          # 78 Python tests
-node --test tests/canvas_writer.test.mjs   # 28 JS tests, no npm install needed
+pytest tests/                          # 87 Python tests
+node --test tests/canvas_writer.test.mjs tests/health_summary.test.mjs   # 35 JS tests
 ```
 
 (Pass the `.mjs` file explicitly — a quoted `tests/*.test.mjs` glob is not
