@@ -165,6 +165,18 @@ def test_health_counts_blueprints():
     print(f"ok: health counts {expected} blueprints")
 
 
+def test_superseded_modes_name_their_replacement():
+    """A workflow saved before EXPLAIN/DEBUG/SUGGEST were removed from the
+    node still sends them. The reply must point at CHAT rather than reading
+    as a missing feature."""
+    for mode in ("EXPLAIN", "DEBUG", "SUGGEST"):
+        result = asyncio.run(agent_routes._handle_superseded_mode(mode))
+        assert "CHAT" in result["error_detail"]
+        assert mode in result["error_detail"]
+        assert result["execution_ready"] is False
+    print("ok: superseded modes point the user at CHAT")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
