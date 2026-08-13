@@ -15,6 +15,11 @@ bug-fixing pass driven by real failures observed in the browser and via
 direct API calls — not just static review. See below for what was found and
 fixed, and what remains a known limitation rather than a bug.
 
+**New here?** [`docs/comfy_agent_explained.pdf`](docs/comfy_agent_explained.pdf)
+is a nine-page walkthrough of how the node works — the three modes, the
+generation pipeline, undo, and what happens when things fail. Regenerate it
+with `python docs/make_pdf.py` (needs matplotlib, which ComfyUI already ships).
+
 What exists:
 
 - `agent_node.py` — V3-schema node. Imports the newest *pinned* `comfy_api`
