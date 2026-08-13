@@ -171,6 +171,13 @@ async function triggerBuild(node) {
                 msg = `Placed ${injectResult.nodeCount} nodes — ${injectResult.incompleteCount} ` +
                       `highlighted node(s) still need connections before this can run`;
             }
+            // Links the server asked for that could not be wired. Naming them
+            // turns a silently sparser graph into something the user can go
+            // and fix by hand.
+            if (injectResult.skippedLinks?.length) {
+                msg += ` — ${injectResult.skippedLinks.length} link(s) not wired: ` +
+                       injectResult.skippedLinks.join("; ");
+            }
             // Non-fatal server-side findings (e.g. orphan nodes): the build
             // succeeded but the workflow may not run as intended.
             if (Array.isArray(result.warnings) && result.warnings.length) {
