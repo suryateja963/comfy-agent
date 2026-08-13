@@ -15,7 +15,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from . import classify, stage_a_identify, stage_b_configure, stage_c_connect, stage_d_validate
+from . import (
+    classify,
+    stage_a_identify,
+    stage_b_configure,
+    stage_c_connect,
+    stage_d_validate,
+    stage_m_modify,
+)
 from ..knowledge import schema_compactor
 from .. import config, llm_client
 
@@ -198,3 +205,86 @@ async def generate_workflow(
         incomplete=list(incomplete),
         validation=validation,
     )
+
+
+@dataclass
+class ModifyResult:
+    ok: bool
+    diff: stage_m_modify.ModifyDiff | None = None
+    error: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
+async def modify_workflow(
+    task_prompt: str,
+    graph: Any,
+    on_progress: ProgressCallback = _noop_progress,
+) -> ModifyResult:
+    """MODIFY mode: produce a validated diff against the canvas graph.
+
+    Shares Pass 1 and the schema compactor with generate_workflow, so the
+    candidate pool for *added* nodes is filtered the same way — a MODIFY that
+    could only add from an unfiltered registry would put the whole 1767-node
+    list in front of a 0.8B model.
+    """
+    nodes = stage_m_modify.canvas_nodes(graph)
+    if not nodes:
+        return ModifyResult(
+            ok=False,
+            error="the canvas is empty - use BUILD to create a workflow before modifying one",
+        )
+
+    try:
+        await on_progress("Fetching node registry...")
+        object_info = await schema_compactor.fetch_object_info()
+    except RuntimeError as exc:
+        return ModifyResult(ok=False, error=str(exc))
+
+    await on_progress("Classifying requested change...")
+    try:
+        with _stage_timer("1_classify") as fields:
+            categories = await classify.classify_task(task_prompt)
+            fields["categories"] = ",".join(categories)
+    except (llm_client.OllamaGenerationError, llm_client.OllamaUnavailableError):
+        logger.warning("Pass 1 classification failed; using broad category pool", exc_info=True)
+        categories = [c for c in classify.CATEGORY_LIST if c != "custom"]
+
+    compacted = schema_compactor.compact_schema(object_info, categories)
+    # Nodes already on the canvas must be in the schema too, or a widget change
+    # to one of them is rejected for a node type the user can plainly see.
+    for class_type in set(nodes.values()):
+        if class_type not in compacted and isinstance(object_info.get(class_type), dict):
+            compacted[class_type] = object_info[class_type]
+    if not compacted:
+        return ModifyResult(ok=False, error="no matching nodes found for the requested change")
+
+    schema_block = schema_compactor.to_compact_prompt_block(compacted)
+
+    await on_progress(f"Planning changes to {len(nodes)} node(s)...")
+    try:
+        with _stage_timer("M_modify", canvas_nodes=len(nodes)) as fields:
+            diff = await stage_m_modify.generate_diff(
+                task_prompt, nodes, compacted, schema_block
+            )
+            fields["add"] = len(diff.add_nodes)
+            fields["remove"] = len(diff.remove_node_ids)
+            fields["widgets"] = len(diff.set_widgets)
+            fields["rejected"] = len(diff.rejected)
+    except stage_m_modify.StageMError as exc:
+        return ModifyResult(ok=False, error=str(exc))
+
+    if diff.is_empty:
+        return ModifyResult(
+            ok=False,
+            error=(
+                "no valid changes were produced for that request"
+                + (f" (rejected: {'; '.join(diff.rejected)})" if diff.rejected else "")
+            ),
+        )
+
+    warnings: list[str] = []
+    if diff.rejected:
+        warnings.append(f"{len(diff.rejected)} proposed edit(s) rejected: {'; '.join(diff.rejected)}")
+
+    await on_progress(f"Done - {diff.summary()}")
+    return ModifyResult(ok=True, diff=diff, warnings=warnings)
