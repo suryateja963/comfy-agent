@@ -17,6 +17,7 @@ Verified against comfyui_frontend_package 1.48.7.
 """
 
 import pathlib
+import re
 import sys
 
 # Every LiteGraph/ComfyUI API the JS layer depends on, with the file that
@@ -111,6 +112,7 @@ def test_our_extension_files_are_all_present():
         "agent_node_ui.js",
         "canvas_writer.js",
         "chat_panel.js",
+        "health_summary.js",
         "progress_listener.js",
         "agent_style.css",
     }
@@ -123,11 +125,16 @@ def test_js_imports_resolve_to_real_frontend_modules():
     """js/ imports ../../scripts/app.js and api.js. Those are shims re-exporting
     window.comfyAPI; if the names change, every import fails at load."""
     js_dir = pathlib.Path(__file__).resolve().parent.parent / "js"
+    # Match real import statements only. A looser scan for "../../scripts/"
+    # also matched the path when it appeared in a prose comment, which failed
+    # this test for a file that imports nothing at all.
+    import_re = re.compile(r"""^\s*import\s.*?["']\.\./\.\./scripts/([\w.]+)["']""")
     imported = set()
     for path in js_dir.glob("*.js"):
         for line in path.read_text(encoding="utf-8").splitlines():
-            if "../../scripts/" in line:
-                imported.add(line.split("../../scripts/")[1].split('"')[0])
+            match = import_re.match(line)
+            if match:
+                imported.add(match.group(1))
     assert imported <= {"app.js", "api.js"}, (
         f"js/ imports an unexpected core module: {sorted(imported)}"
     )
