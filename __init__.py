@@ -21,6 +21,31 @@ logger = logging.getLogger("comfy_agent")
 
 WEB_DIRECTORY = "./js"
 
+
+def _apply_log_level() -> None:
+    """Set the level for this package's logger tree from config.LOG_LEVEL.
+
+    Only the "comfy_agent" logger is touched, never the root: this runs inside
+    someone else's application, and reconfiguring global logging from a custom
+    node would be a rude surprise. LOG_LEVEL = None opts out entirely.
+    """
+    from . import config
+
+    level = getattr(config, "LOG_LEVEL", None)
+    if not level:
+        return
+    resolved = logging.getLevelName(str(level).upper())
+    if not isinstance(resolved, int):
+        logger.warning("ignoring invalid LOG_LEVEL %r", level)
+        return
+    logger.setLevel(resolved)
+
+
+try:
+    _apply_log_level()
+except Exception:  # noqa: BLE001
+    logger.debug("comfy_agent: could not apply LOG_LEVEL", exc_info=True)
+
 from .agent_node import comfy_entrypoint  # noqa: E402, F401
 
 try:
