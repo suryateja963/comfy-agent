@@ -323,6 +323,24 @@ app.registerExtension({
             applyMode();
         };
 
+        // Tear down per-node state when the node leaves the canvas. Without
+        // this, removing and re-adding the agent node accumulates orphaned
+        // chat listeners and leaves a streaming callback holding DOM that is
+        // no longer on screen.
+        const originalOnRemoved = node.onRemoved;
+        node.onRemoved = function () {
+            try {
+                chat.destroy();
+            } catch (err) {
+                console.warn("[comfy_agent] chat panel teardown failed:", err);
+            }
+            // Stop any in-flight build or chat from writing to a dead node.
+            this.comfyAgentBuildId = null;
+            this.comfyAgentChatId = null;
+            this.comfyAgentStatusWidget = null;
+            return originalOnRemoved?.apply(this, arguments);
+        };
+
         applyMode();
 
         // Report a broken setup in the node itself. The same information is
