@@ -8,6 +8,7 @@ are stubbed; nothing here reaches the network.
     python tests/test_modify.py    # standalone, no pytest needed
 """
 
+import asyncio
 import importlib.util
 import pathlib
 import sys
@@ -257,6 +258,44 @@ def test_destructive_diffs_are_flagged_for_escalation():
     )
     assert not stage_m._is_implausibly_destructive(stage_m.ModifyDiff([], [], [], []), nodes)
     print("ok: wholesale deletion is flagged, a single removal is not")
+
+
+def test_modify_prefers_the_escalation_model():
+    """MODIFY routes to the fallback model first, unlike every other stage.
+
+    Measured against a live install: asked to set steps to 35, qwen3.5:4b and
+    :9b returned exactly the right edit while the 0.8B edited an unrelated
+    node with an unrelated value. A wrong MODIFY corrupts existing work, so
+    the extra latency is worth it here even though BUILD does not pay it.
+    """
+    called = {}
+
+    async def fake_resolve(force=False):
+        return ("small-primary", "big-fallback")
+
+    async def fake_generate_json(prompt, schema, *, model=None, system=None):
+        called["model"] = model
+        return {"add_nodes": [], "remove_node_ids": [], "set_widgets": []}
+
+    async def fail_if_used(*a, **kw):
+        raise AssertionError("generate_json_with_fallback must not be the first choice")
+
+    llm = sys.modules["comfy_agent.generation.stage_m_modify"].llm_client
+    orig = (llm.resolve_models, llm.generate_json, llm.generate_json_with_fallback)
+    llm.resolve_models = fake_resolve
+    llm.generate_json = fake_generate_json
+    llm.generate_json_with_fallback = fail_if_used
+    try:
+        asyncio.run(
+            stage_m.generate_diff("set steps to 35", {1: "KSampler"}, SCHEMA, "KSampler: in=[] out=[]")
+        )
+    finally:
+        llm.resolve_models, llm.generate_json, llm.generate_json_with_fallback = orig
+
+    assert called["model"] == "big-fallback", (
+        f"MODIFY should try the escalation model first, used {called.get('model')!r}"
+    )
+    print("ok: MODIFY prefers the escalation model over the primary")
 
 
 def test_summary_describes_the_edit():
