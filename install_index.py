@@ -269,6 +269,10 @@ async def build(force: bool = False, on_progress=None) -> dict[str, Any]:
         cached = None if force else _load_cache(fingerprint)
         if cached and len(cached["vectors"]) == len(names):
             vectors = cached["vectors"]
+            # Clear any reason recorded by an earlier failed build in this
+            # process: retrieval is no longer degraded, and a stale reason is
+            # reported verbatim by stats() (and so by /agent/health).
+            _build_failed_reason = ""
             logger.info("loaded install index from cache (%d nodes)", len(names))
         else:
             started = time.monotonic()
