@@ -118,6 +118,7 @@ custom_nodes/comfy_agent/
 │   ├── stage_b_configure.py Stage B — widget values for each node
 │   ├── stage_c_connect.py   Stage C — links between nodes
 │   ├── stage_d_validate.py  Stage D — structural validation before it ships
+│   ├── stage_m_modify.py    Stage M — validated diff against the live canvas
 │   └── pipeline.py          orchestrates Pass 1 + Stages A–D, streams progress
 ├── blueprint_defs/          8 pre-authored workflow templates (JSON)
 └── js/
