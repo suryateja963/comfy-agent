@@ -10,7 +10,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findFreeZone, injectWorkflow, setWidgetValue } from "../js/canvas_writer.js";
+import {
+    findFreeZone,
+    injectWorkflow,
+    restoreGraph,
+    setWidgetValue,
+    snapshotGraph,
+} from "../js/canvas_writer.js";
 
 // Real widget order, as reported by a live ComfyUI /object_info. KSampler has
 // SIX widgets — blueprints authored against the legacy layout supply seven
@@ -57,6 +63,15 @@ function makeApp(existingNodes = []) {
             this._nodes.push(n);
         },
         setDirtyCanvas() {},
+        // Mirrors LiteGraph's save/load pair closely enough to test the
+        // snapshot/undo contract: serialize() must not alias live state, and
+        // configure() replaces the graph wholesale.
+        serialize() {
+            return JSON.parse(JSON.stringify({ nodes: this._nodes }));
+        },
+        configure(data) {
+            this._nodes = JSON.parse(JSON.stringify(data.nodes ?? []));
+        },
     };
     return { graph, canvas: null };
 }
@@ -289,6 +304,45 @@ test("a link naming a slot that does not exist is reported as skipped", () => {
     assert.equal(result.linkCount, 0);
     assert.equal(result.skippedLinks.length, 1);
     assert.match(result.skippedLinks[0], /nonexistent/);
+});
+
+test("a snapshot taken before injection restores the original canvas", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    const before = snapshotGraph(app.graph);
+    assert.equal(app.graph._nodes.length, 1);
+
+    injectWorkflow(
+        app,
+        { node_instances: { ks_1: "KSampler", save_1: "SaveImage" }, widgets: {}, links: [] },
+        6,
+    );
+    assert.equal(app.graph._nodes.length, 3, "injection should have added nodes");
+
+    assert.equal(restoreGraph(app, before), true);
+    assert.equal(app.graph._nodes.length, 1, "undo must remove the injected nodes");
+});
+
+test("a snapshot does not alias live graph state", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    const before = snapshotGraph(app.graph);
+    // Mutating the graph after snapshotting must not change the snapshot; a
+    // shallow copy here would make undo restore the post-change state.
+    app.graph._nodes[0].pos = [999, 999];
+    assert.deepEqual(before.nodes[0].pos, [100, 100]);
+});
+
+test("restoring a null snapshot is refused rather than clearing the canvas", () => {
+    installLiteGraph();
+    const app = makeApp([node(100, 100)]);
+    assert.equal(restoreGraph(app, null), false);
+    assert.equal(app.graph._nodes.length, 1, "a failed undo must not wipe the graph");
+});
+
+test("snapshotGraph reports failure instead of throwing", () => {
+    const broken = { serialize() { throw new Error("unserializable node"); } };
+    assert.equal(snapshotGraph(broken), null);
 });
 
 test("createdNodeIds reports the ids of every placed node", () => {
