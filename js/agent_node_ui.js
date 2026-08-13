@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { injectWorkflow } from "./canvas_writer.js";
+import { injectWorkflow, restoreGraph, snapshotGraph } from "./canvas_writer.js";
 import { listenForAgentProgress, listenForChatTokens } from "./progress_listener.js";
 import { createChatPanel } from "./chat_panel.js";
 
@@ -162,6 +162,11 @@ async function triggerBuild(node) {
         }
 
         try {
+            // Taken immediately before the only mutation in this function, so
+            // Undo reverts exactly this action and nothing that happened while
+            // the request was in flight.
+            node.comfyAgentUndoSnapshot = snapshotGraph(app.graph);
+
             const wrapThreshold = result.subgraph_wrap_threshold ?? SUBGRAPH_WRAP_THRESHOLD;
             const injectResult = injectWorkflow(
                 app, spec, wrapThreshold, result.incomplete_inputs ?? [],
@@ -297,6 +302,29 @@ app.registerExtension({
             triggerBuild(node);
         });
 
+        // Undo is what makes an agent safe to try on a workflow you care
+        // about. Without it, the first bad build teaches the user never to
+        // press the button again.
+        const undoButton = node.addWidget("button", "Undo Last Agent Action", null, () => {
+            if (node.comfyAgentBuilding) {
+                setStatus(node, "Cannot undo while a build is running.");
+                return;
+            }
+            if (!node.comfyAgentUndoSnapshot) {
+                setStatus(node, "Nothing to undo — no agent action this session.");
+                return;
+            }
+            if (restoreGraph(app, node.comfyAgentUndoSnapshot)) {
+                // One level of undo only: keeping the snapshot would let a
+                // second press "undo" a state that is already restored.
+                node.comfyAgentUndoSnapshot = null;
+                node.comfyAgentBuiltNodeIds = null;
+                setStatus(node, "Reverted the canvas to before the last agent action.");
+            } else {
+                setStatus(node, "Undo failed — the canvas was left unchanged.");
+            }
+        });
+
         // --- CHAT panel ---
         const chat = createChatPanel(app, node);
         const chatWidget = node.addDOMWidget("chat", "div", chat.root, {
@@ -320,7 +348,11 @@ app.registerExtension({
 
             // Build is for the non-chat modes, Clear Chat only for CHAT.
             // Both are buttons, so restoring `type` is unconditional.
-            for (const [w, hide] of [[buildButton, chatting], [clearButton, !chatting]]) {
+            for (const [w, hide] of [
+                [buildButton, chatting],
+                [undoButton, chatting],
+                [clearButton, !chatting],
+            ]) {
                 if (!w) continue;
                 w.hidden = hide;
                 // LiteGraph checks type against "hidden" in some paths.
@@ -374,6 +406,9 @@ app.registerExtension({
             this.comfyAgentChatId = null;
             this.comfyAgentStatusWidget = null;
             this.comfyAgentBuiltNodeIds = null;
+            // A full graph serialization; not worth retaining for a node that
+            // is no longer on the canvas.
+            this.comfyAgentUndoSnapshot = null;
             return originalOnRemoved?.apply(this, arguments);
         };
 
