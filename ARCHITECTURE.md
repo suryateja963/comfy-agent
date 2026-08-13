@@ -101,7 +101,8 @@ browser).
 custom_nodes/comfy_agent/
 ├── __init__.py              registers via comfy_entrypoint, sets WEB_DIRECTORY
 ├── agent_node.py            the ComfyAgent node itself (V3 schema)
-├── agent_routes.py          /agent/ping, /agent/build_workflow, /agent/chat
+├── agent_routes.py          /agent/ping, /agent/health, /agent/build_workflow,
+│                            /agent/chat
 ├── chat_context.py          CHAT system prompt: canvas + models + nodes + error
 ├── install_index.py         semantic index over all installed nodes + models
 ├── llm_client.py            async Ollama client, retry + fallback escalation
