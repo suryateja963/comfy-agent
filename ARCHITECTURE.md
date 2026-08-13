@@ -582,12 +582,14 @@ workflow JSON, drop it in `blueprint_defs/<name>.json`, and add its trigger
 keywords to `BLUEPRINT_KEYWORDS` in `blueprint_matcher.py`. No Python
 changes needed.
 
-**Add a mode:** `EXPLAIN`/`DEBUG`/`SUGGEST` are wired into
-`agent_routes.py`'s dispatch but currently return "not implemented yet" —
-each needs a handler function following the same shape as `_handle_build`.
-The canvas state they need is not missing: the frontend serializes the graph
-on every CHAT and MODIFY request, so a new handler can reuse that rather than
-rebuilding it.
+**Add a mode:** `EXPLAIN`/`DEBUG`/`SUGGEST` are no longer offered by the node
+— CHAT supersedes all three (Section 3A amendment) — but the dispatch still
+accepts them so a workflow saved before that change gets a message naming the
+replacement rather than an opaque error. A genuinely new mode needs a handler
+following the same shape as `_handle_build`, plus an entry in the `mode` combo
+in `agent_node.py`. The canvas state a new mode needs is not missing: the
+frontend serializes the graph on every CHAT and MODIFY request, so a new
+handler can reuse that rather than rebuilding it.
 
 `MODIFY` is implemented and is the worked example to copy. It follows a
 different shape from `_handle_build` on purpose: `generation/stage_m_modify.py`
