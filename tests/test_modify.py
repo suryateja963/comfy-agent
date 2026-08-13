@@ -203,6 +203,62 @@ def test_missing_diff_keys_are_treated_as_empty():
     print("ok: a diff with no keys at all is empty rather than an error")
 
 
+def test_object_wrapped_values_are_rejected():
+    """Measured against a live Ollama: every model size returned the value
+    wrapped in a descriptor object ({"i": 35}) rather than the value itself.
+    A widget holds a scalar, so a container is always wrong here — and writing
+    one produces a node that looks configured and cannot run."""
+    for bad in ({"i": 35}, {"default_value": 20, "type": "int"}, [35]):
+        diff = stage_m.validate_diff(
+            {
+                "add_nodes": [],
+                "remove_node_ids": [],
+                "set_widgets": [{"node_id": 1, "widget": "steps", "value": bad}],
+            },
+            stage_m.canvas_nodes(CANVAS),
+            SCHEMA,
+        )
+        assert diff.set_widgets == [], f"{bad!r} must not reach the canvas"
+        assert any("scalar" in r for r in diff.rejected)
+    print("ok: object- and list-wrapped widget values are rejected")
+
+
+def test_widget_values_are_coerced_and_clamped():
+    """Stage M applies the same coercion as Stage B, so a MODIFY cannot write
+    a value that a BUILD would have rejected."""
+    diff = stage_m.validate_diff(
+        {
+            "add_nodes": [],
+            "remove_node_ids": [],
+            "set_widgets": [
+                {"node_id": 1, "widget": "steps", "value": "35"},   # string -> int
+                {"node_id": 1, "widget": "cfg", "value": 999.0},    # above max -> clamped
+            ],
+        },
+        stage_m.canvas_nodes(CANVAS),
+        SCHEMA,
+    )
+    by_widget = {c["widget"]: c["value"] for c in diff.set_widgets}
+    assert by_widget["steps"] == 35 and isinstance(by_widget["steps"], int)
+    assert by_widget["cfg"] == 100.0, "out-of-range values are clamped, not passed through"
+    print("ok: widget values are type-coerced and range-clamped")
+
+
+def test_destructive_diffs_are_flagged_for_escalation():
+    """The 0.8B proposed deleting two of three canvas nodes to change a widget
+    value. Every id was real, so only the shape of the edit reveals it."""
+    nodes = stage_m.canvas_nodes(CANVAS)  # 2 nodes
+    wipe = stage_m.ModifyDiff([], [1, 2], [], [])
+    assert stage_m._is_implausibly_destructive(wipe, nodes)
+
+    one_of_two = stage_m.ModifyDiff([], [1], [], [])
+    assert not stage_m._is_implausibly_destructive(one_of_two, nodes), (
+        "removing a single node is a legitimate edit and must not be flagged"
+    )
+    assert not stage_m._is_implausibly_destructive(stage_m.ModifyDiff([], [], [], []), nodes)
+    print("ok: wholesale deletion is flagged, a single removal is not")
+
+
 def test_summary_describes_the_edit():
     diff = stage_m.validate_diff(
         {

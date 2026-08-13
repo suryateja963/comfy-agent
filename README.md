@@ -173,8 +173,13 @@ What is explicitly not done: Phase 3's EXPLAIN/DEBUG/SUGGEST modes (CHAT
 covers much of what EXPLAIN/DEBUG were meant to do, but the dedicated modes
 still return "not implemented"), context auto-clear, Phase 4
 (cross-platform/version testing). MODIFY is implemented as a validated,
-undoable diff; it has unit coverage but has not yet been exercised against a
-live install. The Week 10 quality re-baselining (VND/NodeComp/
+undoable diff and has been smoke-tested against a live Ollama, which is how
+two defects in it were found and fixed (widget values arriving wrapped in a
+descriptor object, and the 0.8B proposing wholesale deletion to change one
+value). **MODIFY quality still depends heavily on model size**: measured on
+`qwen3.5:4b` and `:9b` it produces the correct minimal diff; on the 0.8B it
+is unreliable for anything beyond a single widget change. Nothing in the node
+has yet been exercised against a running ComfyUI. The Week 10 quality re-baselining (VND/NodeComp/
 LinkComp against a real 20-case golden set) also hasn't happened — what's been
 done here is bug-fixing against observed failures, not the full metric suite.
 Retrieval likewise has no formal recall benchmark; it was tuned against
@@ -305,6 +310,7 @@ semantic index is built, and a `hints` array naming each fix.
 | Build reports *N link(s) not wired* | Model could not connect everything | The nodes are placed and highlighted in amber — finish the wiring by hand, or press **Undo Last Agent Action** and retry |
 | `too many concurrent builds in progress` | Two builds at once | Wait for the first to finish (`MAX_CONCURRENT_BUILDS = 2`) |
 | MODIFY says *the canvas is empty* | Nothing to modify | MODIFY edits an existing workflow. Use BUILD first |
+| MODIFY makes the wrong edit | 0.8B model reasoning over existing node ids | The hardest ask in the pipeline. Pull `qwen3.5:4b` or `:9b` — measured correct where the 0.8B was not. Press **Undo Last Agent Action** and retry |
 | Mode says it *has been replaced by CHAT* | Workflow saved before EXPLAIN/DEBUG/SUGGEST were retired | Set `mode = CHAT`, which covers all three |
 | Node does not appear in ComfyUI at all | Import failed | Check the ComfyUI console for `comfy_agent`. A `no usable comfy_api version found` line means this ComfyUI is too old for the V3 schema |
 | Everything is slow | Small model on CPU | Expected. Blueprint builds bypass the model entirely |
