@@ -132,20 +132,27 @@ function injectBlueprint(graph, spec, originOffset) {
     }
 
     let linkCount = 0;
+    const skippedLinks = [];
     for (const link of spec.links) {
         const [, fromId, fromSlot, toId, toSlot] = link;
         const fromNode = idMap.get(fromId);
         const toNode = idMap.get(toId);
-        if (!fromNode || !toNode) continue; // one side failed to create — skip, don't crash
+        if (!fromNode || !toNode) {
+            // One side failed to create — skip, don't crash. Recorded so the
+            // caller can report it rather than leaving a silently sparser graph.
+            skippedLinks.push(`node ${fromId} -> node ${toId} (node not created)`);
+            continue;
+        }
         try {
             fromNode.connect(fromSlot, toNode, toSlot);
             linkCount += 1;
         } catch (err) {
             console.warn("[comfy_agent] link failed during blueprint injection:", link, err);
+            skippedLinks.push(`node ${fromId} -> node ${toId} (connect failed)`);
         }
     }
 
-    return { createdNodes, failedTypes, linkCount, idMap };
+    return { createdNodes, failedTypes, linkCount, idMap, skippedLinks };
 }
 
 /**
@@ -183,15 +190,29 @@ function injectFreeForm(graph, spec, originOffset) {
     }
 
     let linkCount = 0;
+    // Links the server asked for that did not make it onto the canvas. These
+    // were previously console-only, so a build reporting "6 nodes, 4 links"
+    // gave no indication that a fifth link was requested and dropped — the
+    // user found out when the workflow failed to queue.
+    const skippedLinks = [];
+    const describe = (link) =>
+        `${link.from_node}[${link.from_output}] -> ${link.to_node}[${link.to_input}]`;
+
     for (const link of spec.links || []) {
         const fromNode = idMap.get(link.from_node);
         const toNode = idMap.get(link.to_node);
-        if (!fromNode || !toNode) continue;
+        if (!fromNode || !toNode) {
+            // The node itself failed to create; already reported via failedTypes.
+            skippedLinks.push(`${describe(link)} (node not created)`);
+            continue;
+        }
 
         const fromSlot = findOutputSlot(fromNode, link.from_output);
         const toSlot = findInputSlot(toNode, link.to_input);
         if (fromSlot < 0 || toSlot < 0) {
+            const which = fromSlot < 0 ? `output '${link.from_output}'` : `input '${link.to_input}'`;
             console.warn("[comfy_agent] slot not found for link:", link);
+            skippedLinks.push(`${describe(link)} (no ${which})`);
             continue;
         }
         try {
@@ -199,10 +220,11 @@ function injectFreeForm(graph, spec, originOffset) {
             linkCount += 1;
         } catch (err) {
             console.warn("[comfy_agent] link failed during free-form injection:", link, err);
+            skippedLinks.push(`${describe(link)} (connect failed)`);
         }
     }
 
-    return { createdNodes, failedTypes, linkCount, idMap };
+    return { createdNodes, failedTypes, linkCount, idMap, skippedLinks };
 }
 
 /** Wrap a set of just-created nodes into a SubgraphNode if over threshold
@@ -300,7 +322,7 @@ export function injectWorkflow(app, spec, subgraphWrapThreshold = 6, incompleteI
     const origin = [zx + footprint.shift[0], zy + footprint.shift[1]];
 
     const isBlueprint = Array.isArray(spec.nodes) && Array.isArray(spec.links);
-    const { createdNodes, failedTypes, linkCount, idMap } = isBlueprint
+    const { createdNodes, failedTypes, linkCount, idMap, skippedLinks } = isBlueprint
         ? injectBlueprint(graph, spec, origin)
         : injectFreeForm(graph, spec, origin);
 
@@ -323,5 +345,6 @@ export function injectWorkflow(app, spec, subgraphWrapThreshold = 6, incompleteI
         linkCount,
         failedTypes,
         incompleteCount,
+        skippedLinks,
     };
 }
