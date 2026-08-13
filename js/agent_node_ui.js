@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { injectWorkflow, restoreGraph, snapshotGraph } from "./canvas_writer.js";
+import { applyDiff, injectWorkflow, restoreGraph, snapshotGraph } from "./canvas_writer.js";
 import { listenForAgentProgress, listenForChatTokens } from "./progress_listener.js";
 import { createChatPanel } from "./chat_panel.js";
 
@@ -23,6 +23,20 @@ function injectStylesheet() {
     link.rel = "stylesheet";
     link.href = new URL("./agent_style.css", import.meta.url).href;
     document.head.append(link);
+}
+
+/**
+ * Serialize the canvas for the server. Wrapped because graph serialization
+ * can throw on a graph containing a malformed node, and MODIFY should report
+ * that clearly rather than failing inside JSON.stringify.
+ */
+function captureGraph(appRef) {
+    try {
+        return appRef.graph?.serialize?.() ?? null;
+    } catch (err) {
+        console.warn("[comfy_agent] could not serialize graph:", err);
+        return null;
+    }
 }
 
 function newBuildId() {
@@ -106,6 +120,10 @@ async function triggerBuild(node) {
                     use_blueprint: useBlueprint,
                     sid: api.clientId,
                     build_id: buildId,
+                    // MODIFY edits what is already on the canvas, so it needs
+                    // to see it. Serialized defensively — a graph containing a
+                    // malformed node must not stop the request.
+                    graph: mode === "MODIFY" ? captureGraph(app) : undefined,
                 }),
             });
         } catch (err) {
@@ -150,6 +168,29 @@ async function triggerBuild(node) {
         // and an empty spec, so that is what is tested.
         if (result.error_detail) {
             setStatus(node, `Error: ${result.error_detail}`);
+            return;
+        }
+
+        // MODIFY returns an edit to apply, not a workflow to inject.
+        if (result.diff) {
+            try {
+                node.comfyAgentUndoSnapshot = snapshotGraph(app.graph);
+                const outcome = applyDiff(app, result.diff);
+                let msg =
+                    `Modified: ${outcome.removed} removed, ` +
+                    `${outcome.widgetsSet} widget(s) changed, ${outcome.added} added`;
+                if (outcome.failed.length) {
+                    msg += ` — ${outcome.failed.length} edit(s) failed: ${outcome.failed.join("; ")}`;
+                }
+                if (Array.isArray(result.warnings) && result.warnings.length) {
+                    msg += ` — warnings: ${result.warnings.join("; ")}`;
+                }
+                msg += " (Undo Last Agent Action reverts this)";
+                setStatus(node, msg);
+            } catch (err) {
+                setStatus(node, `Error applying changes: ${err}`);
+                console.error("[comfy_agent] diff application failed:", err);
+            }
             return;
         }
 
@@ -339,6 +380,13 @@ app.registerExtension({
         function applyMode() {
             const mode = node.widgets?.find((w) => w.name === "mode")?.value ?? "BUILD";
             const chatting = mode === "CHAT";
+
+            // The button does different things in different modes; saying so
+            // is cheaper than a user pressing "Build Workflow" and being
+            // surprised that it edited what was already there.
+            if (buildButton) {
+                buildButton.name = mode === "MODIFY" ? "Modify Workflow" : "Build Workflow";
+            }
 
             // DOM widgets are hidden by moving them offscreen; LiteGraph does
             // not honour the `hidden` flag for them the way it does for
