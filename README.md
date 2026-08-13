@@ -30,8 +30,14 @@ What exists:
   so the V3 path would never run.
 - `agent_routes.py` — `/agent/ping`, `/agent/health`, `/agent/build_workflow`
   (BUILD mode: blueprint-first, falls back to free-form), `/agent/chat`
-  (CHAT mode). MODIFY/EXPLAIN/DEBUG/SUGGEST are wired into the dispatch but
-  return "not implemented yet" (Phase 3, Section 5).
+  (CHAT mode), `/agent/build_workflow` with `mode = MODIFY` (edits the
+  workflow already on the canvas). EXPLAIN/DEBUG/SUGGEST are wired into the
+  dispatch but return "not implemented yet" (Phase 3, Section 5).
+- **MODIFY mode** — edits the current canvas instead of building a new
+  workflow. Returns a *diff* (nodes to add, nodes to remove, widget values to
+  change), every part validated against the real canvas ids and the installed
+  registry before it is applied. The canvas is snapshotted first, so
+  **Undo Last Agent Action** reverts the whole edit.
 - `/agent/health` reports what is actually working — Ollama reachability, the
   primary/fallback/embed models, index readiness and blueprint count — with
   the exact `ollama pull` command for anything missing. The node calls it on
@@ -162,11 +168,12 @@ for workflow generation rather than explanation. Its grounding is now accurate
 still be loose. Pointing `PRIMARY_MODEL` at `qwen3.5:4b` or `:9b` gives
 noticeably better explanations at some VRAM cost.
 
-What is explicitly not done: Phase 3's MODIFY/EXPLAIN/DEBUG/SUGGEST modes
-(CHAT covers much of what EXPLAIN/DEBUG were meant to do, but the dedicated
-modes still return "not implemented"), context auto-clear, Phase 4
-(cross-platform/version testing, ComfyUI Manager metadata beyond the
-`pyproject.toml` stub). The Week 10 quality re-baselining (VND/NodeComp/
+What is explicitly not done: Phase 3's EXPLAIN/DEBUG/SUGGEST modes (CHAT
+covers much of what EXPLAIN/DEBUG were meant to do, but the dedicated modes
+still return "not implemented"), context auto-clear, Phase 4
+(cross-platform/version testing). MODIFY is implemented as a validated,
+undoable diff; it has unit coverage but has not yet been exercised against a
+live install. The Week 10 quality re-baselining (VND/NodeComp/
 LinkComp against a real 20-case golden set) also hasn't happened — what's been
 done here is bug-fixing against observed failures, not the full metric suite.
 Retrieval likewise has no formal recall benchmark; it was tuned against
