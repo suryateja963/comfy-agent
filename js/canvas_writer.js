@@ -351,6 +351,73 @@ export function markIncomplete(idMap, incompleteInputs) {
     return marked;
 }
 
+/**
+ * Apply a MODIFY diff to the live canvas: remove nodes, change widget values,
+ * then add new nodes in a free zone.
+ *
+ * Order matters. Removals run first so the free-zone search sees the space
+ * they release, and widget changes are resolved against the pre-removal graph
+ * so an id that no longer exists is reported rather than silently skipped.
+ *
+ * The caller is expected to have snapshotted the graph first — this deletes
+ * the user's nodes, and every failure mode here is one they will want to undo.
+ */
+export function applyDiff(app, diff) {
+    const graph = app.graph;
+    const applied = { removed: 0, widgetsSet: 0, added: 0, failed: [] };
+
+    const byId = new Map((graph._nodes || []).map((n) => [n.id, n]));
+
+    // Widget changes first, while every referenced node is still present.
+    for (const change of diff.set_widgets || []) {
+        const target = byId.get(change.node_id);
+        if (!target) {
+            applied.failed.push(`widget '${change.widget}' (node ${change.node_id} not found)`);
+            continue;
+        }
+        if (setWidgetValue(target, change.widget, change.value)) {
+            applied.widgetsSet += 1;
+        } else {
+            applied.failed.push(`widget '${change.widget}' on node ${change.node_id}`);
+        }
+    }
+
+    for (const nodeId of diff.remove_node_ids || []) {
+        const target = byId.get(nodeId);
+        if (!target) {
+            applied.failed.push(`remove node ${nodeId} (not found)`);
+            continue;
+        }
+        try {
+            graph.remove(target);
+            applied.removed += 1;
+        } catch (err) {
+            console.warn("[comfy_agent] could not remove node:", nodeId, err);
+            applied.failed.push(`remove node ${nodeId}`);
+        }
+    }
+
+    const addTypes = diff.add_nodes || [];
+    if (addTypes.length) {
+        const [zx, zy] = findFreeZone(graph, addTypes.length * COLUMN_PITCH, ROW_HEIGHT);
+        let col = 0;
+        for (const classType of addTypes) {
+            const node = createNodeSafe(graph, classType);
+            if (!node) {
+                applied.failed.push(`add ${classType}`);
+                continue;
+            }
+            node.pos = [zx + col * COLUMN_PITCH, zy];
+            col += 1;
+            graph.add(node);
+            applied.added += 1;
+        }
+    }
+
+    graph.setDirtyCanvas(true, true);
+    return applied;
+}
+
 export function injectWorkflow(app, spec, subgraphWrapThreshold = 6, incompleteInputs = []) {
     const graph = app.graph;
     const footprint = computeSpecFootprint(spec);
