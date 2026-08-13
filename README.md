@@ -17,8 +17,11 @@ fixed, and what remains a known limitation rather than a bug.
 
 What exists:
 
-- `agent_node.py` — V3-schema node (`comfy_api.v0_0_2`). Verified against
-  the real `comfy_api.latest._io.py` on a live install (`io.Schema`,
+- `agent_node.py` — V3-schema node. Imports the newest *pinned* `comfy_api`
+  version available (`v0_0_3`, then `v0_0_2`), falling back to
+  `comfy_api.latest` only if no pinned version is importable, so a ComfyUI
+  release that retires a version cannot make the node unloadable. Verified
+  against the real `comfy_api.latest._io.py` on a live install (`io.Schema`,
   `io.String`/`Combo`/`Int`/`Boolean` `.Input`/`.Output`, `NodeOutput` arg
   order, `ComfyExtension.get_node_list`) — not a guess anymore.
 - `__init__.py` — registers via `comfy_entrypoint` only. **Do not add
