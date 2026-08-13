@@ -264,8 +264,8 @@ conversations and large graphs, not for typical questions.
 ### 5. Run the tests
 
 ```bash
-pytest tests/                          # 45 Python tests
-node --test tests/canvas_writer.test.mjs   # 16 JS tests, no npm install needed
+pytest tests/                          # 78 Python tests
+node --test tests/canvas_writer.test.mjs   # 28 JS tests, no npm install needed
 ```
 
 (Pass the `.mjs` file explicitly — a quoted `tests/*.test.mjs` glob is not
@@ -277,6 +277,44 @@ Two extra checks need live services:
 ```bash
 python tests/test_blueprint_widgets.py --live   # needs ComfyUI on :8188
 ```
+
+## Troubleshooting
+
+**Check the node's status line first.** On creation it calls `/agent/health`
+and reports the first blocking problem it finds, with the command that fixes
+it. Most of the table below is something the node will have already told you.
+
+For the full picture, with ComfyUI running:
+
+```bash
+curl http://127.0.0.1:8188/agent/health
+```
+
+That returns Ollama reachability, which models are installed, whether the
+semantic index is built, and a `hints` array naming each fix.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Ollama is not reachable at http://127.0.0.1:11434` | Ollama is not running | `ollama serve`. Blueprint builds keep working without it — try `examples/01_build_blueprint.json` |
+| Node says *Primary model missing* | No model pulled | `ollama pull qwen3.5:0.8b` |
+| Builds succeed but wire poorly | Running on the 0.8B base model | `ollama pull qwen3.5:4b` (or `:9b`) — it is used automatically as the escalation model |
+| `Stage A generation failed` | Model returned unusable JSON | Usually a too-small model. Pull a larger fallback, or use a prompt that matches a blueprint |
+| First CHAT message hangs ~20s | Index building | Expected once per registry change. It now warms at startup, so this should be rare; the result is cached to disk |
+| CHAT answers vaguely about your nodes | Embedding model missing | `ollama pull nomic-embed-text`. Without it retrieval falls back to keyword matching |
+| Build reports *N link(s) not wired* | Model could not connect everything | The nodes are placed and highlighted in amber — finish the wiring by hand, or press **Undo Last Agent Action** and retry |
+| `too many concurrent builds in progress` | Two builds at once | Wait for the first to finish (`MAX_CONCURRENT_BUILDS = 2`) |
+| MODIFY says *the canvas is empty* | Nothing to modify | MODIFY edits an existing workflow. Use BUILD first |
+| Mode says it *has been replaced by CHAT* | Workflow saved before EXPLAIN/DEBUG/SUGGEST were retired | Set `mode = CHAT`, which covers all three |
+| Node does not appear in ComfyUI at all | Import failed | Check the ComfyUI console for `comfy_agent`. A `no usable comfy_api version found` line means this ComfyUI is too old for the V3 schema |
+| Everything is slow | Small model on CPU | Expected. Blueprint builds bypass the model entirely |
+
+**A build that fails to run.** If a workflow the agent just built errors when
+queued, the node reports it on its own status line and keeps the traceback.
+Switch to CHAT and ask why — it already has the error in context.
+
+**Undo.** Every BUILD and MODIFY snapshots the canvas first. **Undo Last Agent
+Action** reverts the last one. It restores the whole canvas to that moment, so
+manual edits made since are reverted too.
 
 ## Security notice
 
