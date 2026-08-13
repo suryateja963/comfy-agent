@@ -112,8 +112,18 @@ async function triggerBuild(node) {
             setStatus(node, `Error: invalid response (${err})`);
             return;
         }
-        if (!result.execution_ready) {
-            setStatus(node, `Error: ${result.error_detail || "build failed"}`);
+        // `execution_ready` is NOT the failure test. The server deliberately
+        // returns a real spec with execution_ready=false for a graph whose
+        // required inputs are not all wired: those nodes are still worth
+        // placing, and the whole incomplete-build path below (markIncomplete,
+        // the amber highlight, the "needs connections" message) exists to hand
+        // that case to the user. Gating on it here made all of that
+        // unreachable and reported a partial build as an outright failure.
+        //
+        // A genuine failure is the one the server signals with error_detail
+        // and an empty spec, so that is what is tested.
+        if (result.error_detail) {
+            setStatus(node, `Error: ${result.error_detail}`);
             return;
         }
 
