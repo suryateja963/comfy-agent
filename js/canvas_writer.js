@@ -346,5 +346,9 @@ export function injectWorkflow(app, spec, subgraphWrapThreshold = 6, incompleteI
         failedTypes,
         incompleteCount,
         skippedLinks,
+        // LiteGraph assigns ids on graph.add(), so these are only meaningful
+        // after injection. Used to attribute a later execution error to this
+        // build rather than to unrelated nodes on the canvas.
+        createdNodeIds: createdNodes.map((n) => n.id),
     };
 }
