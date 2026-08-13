@@ -332,8 +332,18 @@ async def _handle_build(body: dict, sid: str | None, build_id: str | None = None
     }
 
 
-async def _handle_unsupported_mode(mode: str) -> dict:
-    return _error_result(f"mode '{mode}' is not implemented yet (see MASTER_PLAN.md Phase 3)")
+async def _handle_superseded_mode(mode: str) -> dict:
+    """EXPLAIN/DEBUG/SUGGEST were superseded by CHAT, which answers all three
+    kinds of question in one conversation (MASTER_PLAN.md Section 3A
+    amendment). They are no longer offered by the node, but a workflow saved
+    before that change can still send one, so the reply names the replacement
+    rather than reading as a missing feature.
+    """
+    return _error_result(
+        f"mode '{mode}' has been replaced by CHAT, which explains nodes, "
+        "diagnoses errors and suggests next steps in one conversation. "
+        "Set mode = CHAT on this node."
+    )
 
 
 async def _handle_modify(body: dict, sid: str | None, build_id: str | None = None) -> dict:
@@ -536,7 +546,9 @@ async def build_workflow(request: web.Request) -> web.Response:
             elif mode == "MODIFY":
                 result = await _handle_modify(body, sid, build_id)
             elif mode in ("EXPLAIN", "DEBUG", "SUGGEST"):
-                result = await _handle_unsupported_mode(mode)
+                # Kept in the dispatch though the node no longer offers them:
+                # a workflow saved before they were removed still sends one.
+                result = await _handle_superseded_mode(mode)
             else:
                 return web.json_response({"error": f"unknown mode '{mode}'"}, status=400)
     except llm_client.OllamaUnavailableError as exc:
