@@ -16,10 +16,79 @@ import json
 import logging
 from typing import Any
 
-from . import config, install_index
+from . import config, install_index, llm_client
 from .knowledge import schema_compactor
 
 logger = logging.getLogger("comfy_agent.chat_context")
+
+def get_graph_char_budget(model_name: str = "") -> int:
+    """Return CHAT_MAX_GRAPH_CHARS based on model parameters.
+
+    Small models (0.8b, 4b) get a conservative budget to avoid OOM;
+    larger models can afford more graph context.
+    """
+    small_models = ["qwen3.5:0.8b", "qwen3.5:4b", "llama3.1:8b"]
+    if any(m in model_name.lower() for m in small_models):
+        return config.CHAT_MAX_GRAPH_CHARS // 2  # halve the budget for small models
+    return config.CHAT_MAX_GRAPH_CHARS  # full budget for larger models
+
+
+async def summarize_history(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
+    """Summarize conversation history to preserve key info within token budget.
+
+    Calls LLM to produce exactly 3 bullet points (prefixed with '-') preserving:
+    - task goals
+    - model preferences
+    - node types mentioned
+    - widget values set
+
+    Output format: one '- item per line
+
+    Returns (summary_message, trimmed_messages) where trimmed_messages
+    keeps only the most recent 4 exchanges (2 user+assistant pairs),
+    excluding the current user message that triggered summarization.
+    """
+    # Build prompt for LLM summarization
+    prompt = "Summarize the following conversation history in exactly 3 bullet points (prefixed with '-'). "
+    prompt += "Preserve: task goals, model preferences, node types mentioned, widget values set. "
+    prompt += "Output format: one '- item per line.\n\n"
+    prompt += "Conversation history:\n"
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        prompt += f"{role}: {content}\n"
+    prompt += "\nSummary (3 bullet points only, each prefixed with '-'):"
+
+    # Call LLM to generate the summary via chat_stream
+    system_prompt = "You are a conversation summarizer. Produce exactly 3 bullet points (prefixed with '-') summarizing the conversation history. Preserve task goals, model preferences, node types mentioned, and widget values set. Output one '- item per line only."
+
+    summary = await llm_client.chat_stream(
+        [{"role": "user", "content": prompt}],
+        system=system_prompt,
+    )
+
+    # Parse the 3 bullet points from the summary
+    bullets: list[str] = []
+    for line in summary.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("-"):
+            bullets.append(stripped[1:].strip())
+        if len(bullets) >= 3:
+            break
+
+    summary_text = "\n".join(bullets) if bullets else summary.strip()
+
+    # Trim messages: keep only the most recent 4 exchanges (8 messages),
+    # excluding the current user message that triggered summarization
+    if len(messages) <= 8:
+        trimmed = messages[:-1]
+    else:
+        trimmed = messages[-9:-1]
+
+    summary_message = summary_text.strip() if summary_text else ""
+
+    return summary_message, trimmed
+
 
 SYSTEM_PROMPT = """You are a ComfyUI assistant embedded inside a node on the user's canvas.
 
@@ -161,7 +230,30 @@ async def build_system_prompt(question: str, graph: Any, last_error: str = "") -
     except Exception as exc:  # noqa: BLE001
         logger.debug("chat: install index unavailable: %s", exc)
 
+    # Model-aware graph character budgeting (Section 4A): small models get
+    # a reduced graph context to avoid OOM; larger models can afford more.
+    model_name = ""
+    try:
+        installed = await llm_client.list_installed()
+        primary = config.PRIMARY_MODEL
+        primary, _ = await llm_client.resolve_models()
+        if primary in installed:
+            model_name = primary
+    except Exception:  # noqa: BLE001
+        pass
+    graph_budget = get_graph_char_budget(model_name)
+
     graph_block = render_graph_block(graph)
+    # Truncate if exceeding the model-aware budget
+    if len(graph_block) > graph_budget:
+        logger.debug(
+            "chat: graph block %d chars exceeds budget %d for model %s; truncating",
+            len(graph_block),
+            graph_budget,
+            model_name or "unknown",
+        )
+        # Re-render with stricter trimming: node types and counts only
+        graph_block = _summarize_graph(graph)
     sections.append(f"--- USER'S CURRENT WORKFLOW ---\n{graph_block}")
 
     models_block = install_index.render_model_inventory()

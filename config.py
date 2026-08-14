@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 
 
 def _normalize_host(raw: str, default_port: int) -> str:
@@ -177,7 +178,11 @@ ALLOWED_NETWORK_CIDRS: list[str] = []
 # Shared secret required on non-localhost requests, sent as X-Agent-Token.
 # Strongly recommended whenever ALLOWED_NETWORK_CIDRS is non-empty; an empty
 # value disables the check.
-AGENT_API_TOKEN = ""
+# Generated automatically if left empty, ensuring a token is always present
+# when ALLOW_NETWORK is enabled. Idempotent: only generated when empty on import.
+AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "")
+if not AGENT_API_TOKEN:
+    AGENT_API_TOKEN = secrets.token_hex(16)
 
 BLUEPRINT_DIR_NAME = "blueprint_defs"
 

@@ -19,6 +19,7 @@ from aiohttp import web
 from server import PromptServer
 
 from . import chat_context, config, install_index, llm_client
+from .chat_context import count_prompt_tokens
 from .generation import pipeline
 from .knowledge import blueprint_matcher
 
@@ -70,21 +71,23 @@ def _peer_in_allowed_cidrs(request: web.Request) -> bool:
 def _is_authorized(request: web.Request) -> bool:
     """Access control for the agent routes.
 
-    localhost is always allowed. Beyond that, a peer must fall in an explicit
-    ALLOWED_NETWORK_CIDRS range AND present AGENT_API_TOKEN when one is set.
-    ALLOW_NETWORK remains as a blanket escape hatch but is deliberately the
-    least preferred option — it disables every check at once.
+    localhost is always allowed. Beyond that, token enforcement depends on
+    ALLOW_NETWORK:
+    - ALLOW_NETWORK=True: require a non-empty AGENT_API_TOKEN, validated
+      via secrets.compare_digest(). Empty token → deny access.
+    - ALLOW_NETWORK=False (default): localhost only; beyond that, CIDR
+      allowlist applies but no token check is required.
     """
     if _is_localhost(request):
         return True
     if config.ALLOW_NETWORK:
-        return True
+        token = getattr(config, "AGENT_API_TOKEN", "") or ""
+        if not token:
+            return False
+        return secrets.compare_digest(request.headers.get("X-Agent-Token", ""), token)
     if not _peer_in_allowed_cidrs(request):
         return False
-    token = getattr(config, "AGENT_API_TOKEN", "") or ""
-    if not token:
-        return True
-    return secrets.compare_digest(request.headers.get("X-Agent-Token", ""), token)
+    return True
 
 
 def _is_allowed_origin(request: web.Request) -> bool:
@@ -482,23 +485,70 @@ async def chat(request: web.Request) -> web.Response:
             logger.exception("chat: failed to build system prompt; continuing without context")
             system = chat_context.SYSTEM_PROMPT
 
+        # Token budget tracking (Section 4A). 60% of the 65536 token CHAT context
+        # window leaves headroom for the model's response. If the prompt alone
+        # exceeds this, auto-summarise the conversation history before sending to
+        # the LLM, then also trim the graph block so the next prompt fits under budget.
+        estimated_tokens = count_prompt_tokens(messages)
+        budget_percentage = estimated_tokens / 65536 * 100
+        await _ws_send(CHAT_TOKEN_EVENT, {"type": "token_budget", "used": estimated_tokens, "total": 65536, "percentage": budget_percentage}, sid)
+        if estimated_tokens > 38000:
+            logger.warning(
+                "chat: prompt too large (%d tokens, max 38000) — triggering conversation summarisation",
+                estimated_tokens,
+            )
+            # Auto-summarise conversation history, keeping only the most recent exchanges
+            summary, messages = await chat_context.summarize_history(messages)
+            # Prepend summary as a system-notice message; the LLM will see it as part of context
+            messages.append({"role": "assistant", "content": f"[Conversation summarized] {summary}"})
+            # Re-count after summarisation; if still over budget, trim the graph
+            estimated_tokens = count_prompt_tokens(messages)
+            if estimated_tokens > 38000:
+                logger.warning(
+                    "chat: still too large (%d tokens) after summarisation — trimming graph",
+                    estimated_tokens,
+                )
+                graph = None  # force render_graph_block to return the empty message
+
         async def on_token(token: str) -> None:
             payload = {"token": token}
             if chat_id:
                 payload["chat_id"] = chat_id
             await _ws_send(CHAT_TOKEN_EVENT, payload, sid)
 
+        error_result = None
+        error_status = None
         try:
             reply = await llm_client.chat_stream(messages, system=system, on_token=on_token)
         except llm_client.OllamaUnavailableError as exc:
-            return web.json_response({"error": str(exc)}, status=503)
+            error_result = str(exc)
+            error_status = 503
         except llm_client.OllamaGenerationError as exc:
-            return web.json_response({"error": str(exc)}, status=502)
+            error_result = str(exc)
+            error_status = 502
         except Exception as exc:  # noqa: BLE001
             logger.exception("chat failed unexpectedly")
-            return web.json_response({"error": f"internal error: {exc}"}, status=500)
+            error_result = f"internal error: {exc}"
+            error_status = 500
 
-    return web.json_response({"reply": reply, "chat_id": chat_id})
+        # Error recovery: for retryable LLM errors (503/502),
+        # strip the last message that caused the issue and re-invoke
+        if error_result is not None and error_status in (503, 502):
+            if len(messages) > 1:
+                trimmed_messages = messages[:-1]
+                try:
+                    reply = await llm_client.chat_stream(
+                        trimmed_messages, system=system, on_token=on_token
+                    )
+                    error_result = None  # Retry succeeded
+                except Exception as retry_exc:
+                    error_result = f"retry failed: {retry_exc}"
+                    error_status = 500
+
+    if error_result is not None:
+        return web.json_response({"error": error_result}, status=error_status)
+    budget_info = {"used": estimated_tokens, "total": 65536, "percentage": budget_percentage}
+    return web.json_response({"reply": reply, "chat_id": chat_id, "token_budget": budget_info})
 
 
 @routes.post("/agent/build_workflow")
