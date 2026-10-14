@@ -320,7 +320,10 @@ async def build(force: bool = False, on_progress=None) -> dict[str, Any]:
         models = await harvest_models()
 
         vectors: list[list[float]] = []
-        cached = None if force else _load_cache(fingerprint, names)
+        # The cache is ~18 MB of JSON. Reading or writing it inline would
+        # stall ComfyUI's whole server (every request, every WS message) for
+        # as long as that takes, so file I/O runs in a worker thread.
+        cached = None if force else await asyncio.to_thread(_load_cache, fingerprint, names)
         if cached is not None:
             vectors = cached
             # Clear any reason recorded by an earlier failed build in this
@@ -333,7 +336,7 @@ async def build(force: bool = False, on_progress=None) -> dict[str, Any]:
             # Salvage vectors for nodes that are unchanged. Installing one node
             # pack otherwise re-embedded all 1767 nodes, turning a ~2s update
             # into the full ~22s build.
-            reusable = {} if force else _load_cached_vectors(names)
+            reusable = {} if force else await asyncio.to_thread(_load_cached_vectors, names)
             missing = [i for i, name in enumerate(names) if name not in reusable]
             if reusable:
                 logger.info(
@@ -357,7 +360,8 @@ async def build(force: bool = False, on_progress=None) -> dict[str, Any]:
                 # Only the name->vector mapping is persisted: the positional
                 # list is derived from it on load, and storing both would
                 # double an already ~18 MB file.
-                _save_cache(
+                await asyncio.to_thread(
+                    _save_cache,
                     {
                         "version": _CACHE_VERSION,
                         "fingerprint": fingerprint,
@@ -485,43 +489,52 @@ _STOPWORDS = frozenset(
 )
 
 
-_CUSTOM_EXPANSIONS: dict[str, list[str]] = {
-    "txt2img": ["CheckpointLoader", "CLIP", "KSampler", "Positive", "Negative"],
-    "img2img": ["CheckpointLoader", "CLIP", "KSampler", "Denoise"],
-    "video": ["VideoLoader", "KSampler", "LatentUpscale"],
-    "upscale": ["LatentUpscale", "ESRT"],
-    "controlnet": ["ControlNetUnit", "Preprocessor"],
-    "custom": [],
+# Tasks a question can name, detected from the user's own words, and the name
+# fragments that mark a node as belonging to that task. "How do I upscale
+# this?" then ranks the upscale nodes above loosely related ones.
+#
+# Detection reads the question, never node names: users write "upscale", not
+# "LatentUpscale". And the boost multiplies existing scores rather than adding
+# words to the query — injected node names would trip the exact-name bonus and
+# crowd out whatever the user actually asked about. txt2img is left out on
+# purpose: nearly every question is about it, so boosting it ranks nothing.
+_TASK_CATEGORIES: dict[str, tuple[re.Pattern[str], tuple[str, ...]]] = {
+    "img2img": (
+        re.compile(r"\b(img2img|image[ -]to[ -]image)\b"),
+        ("img2img", "vaeencode", "loadimage"),
+    ),
+    "video": (
+        re.compile(r"\b(videos?|animat\w*|wan)\b"),
+        ("video", "wan", "animat", "webm"),
+    ),
+    "upscale": (
+        re.compile(r"\b(upscal\w*|hi-?res|super[ -]resolution)\b"),
+        ("upscale",),
+    ),
+    "controlnet": (
+        re.compile(r"\b(control ?nets?|openpose|poses?|depth|canny)\b"),
+        ("controlnet", "preprocessor", "openpose", "depth", "canny"),
+    ),
 }
 
+# Multiplies, so a node with no relevance (score 0) stays out of the results;
+# it only reorders nodes that already matched.
+CATEGORY_BOOST = 1.5
 
-def _classify_task_category(question: str) -> str:
-    """Simple keyword-based task category classification for query expansion.
 
-    Uses the same categories as the BUILD pipeline Pass 1 classifier.
-    """
+def _task_categories(question: str) -> list[str]:
     q = question.lower()
-    for category, keywords in _CUSTOM_EXPANSIONS.items():
-        if any(k in q for k in keywords):
-            return category
-    return "custom"
+    return [name for name, (pattern, _) in _TASK_CATEGORIES.items() if pattern.search(q)]
 
 
-def expand_query_with_categories(question: str) -> str:
-    """Prepend category-relevant node types to improve retrieval.
-
-    When the user's question maps to a known task category, add the most
-    characteristic node types so the embedding/search sees them as primary
-    signals rather than noise.
-    """
-    category = _classify_task_category(question)
-    if category == "custom":
-        return question
-
-    extra_terms = _CUSTOM_EXPANSIONS.get(category, [])
-    if extra_terms:
-        return " ".join(extra_terms) + " | " + question
-    return question
+def _category_multipliers(question: str, names: list[str]) -> list[float]:
+    markers = [m for c in _task_categories(question) for m in _TASK_CATEGORIES[c][1]]
+    if not markers:
+        return [1.0] * len(names)
+    return [
+        CATEGORY_BOOST if any(m in name.lower() for m in markers) else 1.0
+        for name in names
+    ]
 
 
 def _keyword_scores(question: str, descriptions: list[str]) -> list[float]:
@@ -603,7 +616,6 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 async def search(question: str, top_k: int | None = None) -> list[str]:
     """Return schema lines for the nodes most relevant to `question`."""
-    question = expand_query_with_categories(question)
     index = await build()
     if top_k is None:
         top_k = config.CHAT_RETRIEVAL_TOP_K
@@ -629,34 +641,13 @@ async def search(question: str, top_k: int | None = None) -> list[str]:
         for i in range(len(scores)):
             scores[i] += 2.0 * name_bonus[i]
 
+    # Applied before sorting: boosting after the ranked list is built, as an
+    # earlier version did, changes nothing the caller sees.
+    for i, multiplier in enumerate(_category_multipliers(question, names)):
+        scores[i] *= multiplier
+
     ranked = sorted(range(len(names)), key=lambda i: scores[i], reverse=True)
-    ranked_results = [index["schema_lines"][i] for i in ranked[:top_k] if scores[i] > 0]
-
-    # P1.5 Rerank by task-category relevance: boost results whose node type
-    # matches the user's intent category, so e.g. "make me a video workflow"
-    # surfaces VideoLoader/KSampler before generic nodes.
-    try:
-        user_category = _classify_task_category(question)
-        if user_category != "custom":
-            category_boost = 1.5
-            for idx, i in enumerate(ranked):
-                node_name = index["names"][i].lower()
-                # Check if this node type is characteristic of the user's category
-                cat_keywords = {
-                    "txt2img": {"checkpoint", "clip", "ksampler"},
-                    "img2img": {"checkpoint", "clip", "ksampler", "denoise"},
-                    "video": {"videoloader", "wan", "frame", "fps"},
-                    "upscale": {"latentu", "esrt"},
-                    "controlnet": {"controlnet", "preprocessor"},
-                }
-                kw_set = cat_keywords.get(user_category, set())
-                if any(kw in node_name for kw in kw_set):
-                    # Move this result higher by adjusting its score
-                    scores[i] *= category_boost
-    except Exception:  # noqa: BLE001
-        logger.debug("chat: category reranking failed, using original order")
-
-    return ranked_results
+    return [index["schema_lines"][i] for i in ranked[:top_k] if scores[i] > 0]
 
 
 def render_model_inventory() -> str:
