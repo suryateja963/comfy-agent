@@ -34,12 +34,11 @@ Every BUILD and MODIFY can be reverted with **Undo Last Agent Action**.
 
 ### 1. Add the node to ComfyUI
 
-Clone into ComfyUI's `custom_nodes` folder **as `comfy_agent`** (the repo name
-has a hyphen, which Python cannot import and the test suite cannot run from):
+Clone into ComfyUI's `custom_nodes` folder:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/suryateja963/comfy-agent comfy_agent
+git clone https://github.com/suryateja963/comfy-agent
 ```
 
 Restart ComfyUI. The node appears under **agent → Comfy Agent**. Its only
@@ -242,17 +241,22 @@ agent action can be undone.
 
 ## Development
 
-Run the tests from a clone named `comfy_agent` (see [Install](#1-add-the-node-to-comfyui)):
+Run the tests from the repository folder (pytest 8 or newer):
 
 ```bash
-pytest tests/
+pytest
 node --test tests/canvas_writer.test.mjs tests/health_summary.test.mjs tests/js_syntax.test.mjs
 ```
 
-That is 93 Python and 42 JavaScript tests. Both suites run offline, with
-Ollama, ComfyUI and LiteGraph stubbed. List the `.mjs` files explicitly: a
-quoted `tests/*.test.mjs` glob is not expanded by every shell and silently runs
-nothing.
+That is 107 Python and 41 JavaScript tests. Both suites run offline, with
+Ollama, ComfyUI and LiteGraph stubbed, and GitHub Actions runs them on every
+push and pull request (`.github/workflows/tests.yml`). List the `.mjs` files
+explicitly: a quoted `tests/*.test.mjs` glob is not expanded by every shell and
+silently runs nothing.
+
+`tests/_collect_root_as_dir.py` is a small pytest plugin, enabled in
+`pyproject.toml`, that stops pytest importing the node's `__init__.py` (which
+needs a running ComfyUI) before the tests start.
 
 Two checks use a real install:
 
