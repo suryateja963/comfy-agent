@@ -68,26 +68,54 @@ def _peer_in_allowed_cidrs(request: web.Request) -> bool:
     return False
 
 
+def _configured_token() -> str:
+    return getattr(config, "AGENT_API_TOKEN", "") or ""
+
+
+def _token_matches(request: web.Request, token: str) -> bool:
+    # compare_digest needs equal types; a missing header compares as "".
+    return secrets.compare_digest(request.headers.get("X-Agent-Token", ""), token)
+
+
 def _is_authorized(request: web.Request) -> bool:
     """Access control for the agent routes.
 
-    localhost is always allowed. Beyond that, token enforcement depends on
-    ALLOW_NETWORK:
-    - ALLOW_NETWORK=True: require a non-empty AGENT_API_TOKEN, validated
-      via secrets.compare_digest(). Empty token → deny access.
-    - ALLOW_NETWORK=False (default): localhost only; beyond that, CIDR
-      allowlist applies but no token check is required.
+    - localhost: always allowed.
+    - ALLOW_NETWORK=True: any peer, but only with X-Agent-Token matching
+      AGENT_API_TOKEN. No token configured means no remote access at all.
+    - Otherwise, peers in ALLOWED_NETWORK_CIDRS: allowed, and must also send
+      the token whenever one is configured. Previously the token was never
+      checked on this path, although the README recommended pairing them.
     """
     if _is_localhost(request):
         return True
+    token = _configured_token()
     if config.ALLOW_NETWORK:
-        token = getattr(config, "AGENT_API_TOKEN", "") or ""
-        if not token:
-            return False
-        return secrets.compare_digest(request.headers.get("X-Agent-Token", ""), token)
+        return bool(token) and _token_matches(request, token)
     if not _peer_in_allowed_cidrs(request):
         return False
-    return True
+    return not token or _token_matches(request, token)
+
+
+def _warn_about_network_config() -> None:
+    """Say at startup when the network settings will not do what they look
+    like. Otherwise the first sign is a remote client getting 403s, or
+    nothing at all when a whole subnet can drive the agent unauthenticated."""
+    token = _configured_token()
+    if config.ALLOW_NETWORK and not token:
+        logger.warning(
+            "ALLOW_NETWORK is on but AGENT_API_TOKEN is empty, so every remote "
+            "request will be refused. Set the AGENT_API_TOKEN environment variable."
+        )
+    elif not config.ALLOW_NETWORK and getattr(config, "ALLOWED_NETWORK_CIDRS", None) and not token:
+        logger.warning(
+            "ALLOWED_NETWORK_CIDRS is set without AGENT_API_TOKEN: any machine in %s "
+            "can use the agent without a token.",
+            ", ".join(config.ALLOWED_NETWORK_CIDRS),
+        )
+
+
+_warn_about_network_config()
 
 
 def _is_allowed_origin(request: web.Request) -> bool:
@@ -485,30 +513,56 @@ async def chat(request: web.Request) -> web.Response:
             logger.exception("chat: failed to build system prompt; continuing without context")
             system = chat_context.SYSTEM_PROMPT
 
-        # Token budget tracking (Section 4A). 60% of the 65536 token CHAT context
-        # window leaves headroom for the model's response. If the prompt alone
-        # exceeds this, auto-summarise the conversation history before sending to
-        # the LLM, then also trim the graph block so the next prompt fits under budget.
-        estimated_tokens = count_prompt_tokens(messages)
-        budget_percentage = estimated_tokens / 65536 * 100
-        await _ws_send(CHAT_TOKEN_EVENT, {"type": "token_budget", "used": estimated_tokens, "total": 65536, "percentage": budget_percentage}, sid)
-        if estimated_tokens > 38000:
+        # Token budget (Section 4A). The whole prompt is counted, system block
+        # included, against the configured window — not a hardcoded 65536,
+        # since lowering OLLAMA_CHAT_NUM_CTX is the documented VRAM fix.
+        context_window = config.OLLAMA_CHAT_NUM_CTX
+        prompt_budget = int(context_window * config.CHAT_PROMPT_BUDGET_FRACTION)
+        estimated_tokens = count_prompt_tokens(messages, system)
+
+        if estimated_tokens > prompt_budget and len(messages) > 1:
             logger.warning(
-                "chat: prompt too large (%d tokens, max 38000) — triggering conversation summarisation",
+                "chat: prompt ~%d tokens exceeds budget %d - summarising older turns",
                 estimated_tokens,
+                prompt_budget,
             )
-            # Auto-summarise conversation history, keeping only the most recent exchanges
-            summary, messages = await chat_context.summarize_history(messages)
-            # Prepend summary as a system-notice message; the LLM will see it as part of context
-            messages.append({"role": "assistant", "content": f"[Conversation summarized] {summary}"})
-            # Re-count after summarisation; if still over budget, trim the graph
-            estimated_tokens = count_prompt_tokens(messages)
-            if estimated_tokens > 38000:
-                logger.warning(
-                    "chat: still too large (%d tokens) after summarisation — trimming graph",
-                    estimated_tokens,
-                )
-                graph = None  # force render_graph_block to return the empty message
+            try:
+                summary, earlier = await chat_context.summarize_history(messages)
+            except (llm_client.OllamaUnavailableError, llm_client.OllamaGenerationError):
+                logger.warning("chat: summarisation failed; keeping recent turns only", exc_info=True)
+                summary, earlier = "", messages[-9:-1]
+            # The summary rides in the system prompt, and the conversation must
+            # still end on the user's question: appending it as a trailing
+            # assistant turn left the model nothing to answer.
+            if summary:
+                system += f"\n\n--- EARLIER CONVERSATION (summarised) ---\n{summary}"
+            messages = earlier + [messages[-1]]
+            estimated_tokens = count_prompt_tokens(messages, system)
+
+        if estimated_tokens > prompt_budget and graph is not None:
+            logger.warning(
+                "chat: prompt ~%d tokens still exceeds budget %d - dropping the canvas snapshot",
+                estimated_tokens,
+                prompt_budget,
+            )
+            # The system prompt is already rendered, so it has to be rebuilt
+            # without the graph for dropping it to have any effect.
+            try:
+                system = await chat_context.build_system_prompt(question, None, last_error)
+            except Exception:  # noqa: BLE001
+                logger.exception("chat: failed to rebuild system prompt without the canvas")
+                system = chat_context.SYSTEM_PROMPT
+            estimated_tokens = count_prompt_tokens(messages, system)
+
+        budget_info = {
+            "used": estimated_tokens,
+            "total": context_window,
+            "percentage": round(estimated_tokens / context_window * 100, 1),
+        }
+        budget_event = {"type": "token_budget", **budget_info}
+        if chat_id:
+            budget_event["chat_id"] = chat_id
+        await _ws_send(CHAT_TOKEN_EVENT, budget_event, sid)
 
         async def on_token(token: str) -> None:
             payload = {"token": token}
@@ -530,24 +584,13 @@ async def chat(request: web.Request) -> web.Response:
             logger.exception("chat failed unexpectedly")
             error_result = f"internal error: {exc}"
             error_status = 500
-
-        # Error recovery: for retryable LLM errors (503/502),
-        # strip the last message that caused the issue and re-invoke
-        if error_result is not None and error_status in (503, 502):
-            if len(messages) > 1:
-                trimmed_messages = messages[:-1]
-                try:
-                    reply = await llm_client.chat_stream(
-                        trimmed_messages, system=system, on_token=on_token
-                    )
-                    error_result = None  # Retry succeeded
-                except Exception as retry_exc:
-                    error_result = f"retry failed: {retry_exc}"
-                    error_status = 500
+        # No automatic retry: re-asking without the last message answers a
+        # different question, re-streams tokens the user already saw, and a
+        # 503 means Ollama is down, which an immediate retry cannot fix. The
+        # frontend drops the unanswered turn so the user can simply resend.
 
     if error_result is not None:
         return web.json_response({"error": error_result}, status=error_status)
-    budget_info = {"used": estimated_tokens, "total": 65536, "percentage": budget_percentage}
     return web.json_response({"reply": reply, "chat_id": chat_id, "token_budget": budget_info})
 
 

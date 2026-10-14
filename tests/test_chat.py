@@ -318,6 +318,73 @@ def test_model_inventory_caps_huge_folders():
     print("ok: a huge model folder cannot flood the prompt")
 
 
+def test_task_category_is_read_from_the_users_words():
+    """An earlier version matched mixed-case node names against the
+    lowercased question, so every question classified as "custom"."""
+    assert install_index._task_categories("make me a video workflow") == ["video"]
+    assert install_index._task_categories("how do I upscale this?") == ["upscale"]
+    assert install_index._task_categories("copy the pose with controlnet") == ["controlnet"]
+    assert install_index._task_categories("what CLIP model should I use?") == []
+    assert install_index._task_categories("I want a cat") == [], "'want' is not 'wan'"
+    print("ok: task categories come from the question's own words")
+
+
+def _fake_index(names, descriptions):
+    return {
+        "names": names,
+        "descriptions": descriptions,
+        "schema_lines": [f"{n}: line" for n in names],
+        "vectors": [],
+        "models": {},
+        "fingerprint": "x",
+    }
+
+
+def test_category_boost_reorders_matching_nodes():
+    """Both nodes match "animation" equally; the question is about video, so
+    the animated-output node must rank first. The old rerank ran after the
+    list was built and changed nothing."""
+    install_index._index = _fake_index(
+        ["SaveImage", "SaveAnimatedWEBP"],
+        ["save image animation frames", "save animated webp animation"],
+    )
+    try:
+        lines = asyncio.run(install_index.search("save my animation"))
+    finally:
+        install_index._index = None
+    assert lines[0].startswith("SaveAnimatedWEBP"), lines
+    print("ok: the category boost changes the ranking")
+
+
+def test_category_boost_does_not_add_irrelevant_nodes():
+    # AnimateDiffLoader carries the video marker ("animat") but nothing in the
+    # question matches it, so its score is 0 and the boost must keep it at 0.
+    install_index._index = _fake_index(
+        ["LatentUpscale", "AnimateDiffLoader"],
+        ["upscale latent image", "load a file from disk"],
+    )
+    try:
+        lines = asyncio.run(install_index.search("how do I upscale a video?"))
+    finally:
+        install_index._index = None
+    assert [line.split(":")[0] for line in lines] == ["LatentUpscale"], lines
+    print("ok: a boost only reorders nodes that already matched")
+
+
+def test_graph_budget_reads_model_size_from_the_name():
+    """The hardcoded list missed the default fine-tune's name, so the model
+    the node ships configured for got the large-model budget."""
+    full = config.CHAT_MAX_GRAPH_CHARS
+    assert chat_context.get_graph_char_budget("qwen3.5-0.8b-comfyagent") == full // 2
+    assert chat_context.get_graph_char_budget("qwen3.5:0.8b") == full // 2
+    assert chat_context.get_graph_char_budget("qwen3.5:4b") == full // 2
+    assert chat_context.get_graph_char_budget("qwen3.5:9b") == full
+    assert chat_context.get_graph_char_budget("llama3.1:70b") == full
+    assert chat_context.get_graph_char_budget("mystery-model") == full
+    assert chat_context.get_graph_char_budget("") == full
+    print("ok: graph budget follows the model's parameter count")
+
+
 def test_cosine_handles_zero_vectors():
     assert install_index._cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
     assert abs(install_index._cosine([1.0, 0.0], [1.0, 0.0]) - 1.0) < 1e-9

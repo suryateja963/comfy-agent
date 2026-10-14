@@ -1,11 +1,20 @@
 // CHAT mode UI. Builds a DOM chat panel hosted inside the node via
 // node.addDOMWidget, and drives POST /agent/chat with WS token streaming.
+//
+// Conversations are split into topics: each topic is its own thread with its
+// own history, so "help with my LoRA setup" does not crowd out "why is my
+// image black?" in the context the model sees. Topics are saved with the
+// workflow through serializeInto()/restore(), called from the node's
+// onSerialize/onConfigure — never localStorage, which is shared by every node
+// in every workflow and leaked one workflow's chats into the next.
 import { api } from "../../scripts/api.js";
-import { generateSubgraphFromSuggestions } from "./blueprint_exporter.js";
 
 // Kept in sync with config.CHAT_MAX_HISTORY_MESSAGES. The server trims to its
 // own limit regardless; trimming here too keeps the request small.
 const MAX_HISTORY = 12;
+
+const DEFAULT_TOPIC = "default";
+const MAX_TOPIC_CHARS = 40;
 
 function newChatId() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -33,62 +42,60 @@ function captureGraph(app) {
     }
 }
 
+function normalizeTopic(raw) {
+    const topic = String(raw ?? "").trim().slice(0, MAX_TOPIC_CHARS);
+    return topic || DEFAULT_TOPIC;
+}
+
+// Null-prototype store: topic names are user-typed, and a plain object would
+// let a topic called "__proto__" or "constructor" collide with Object's own.
+function emptyBranches() {
+    const branches = Object.create(null);
+    branches[DEFAULT_TOPIC] = [];
+    return branches;
+}
+
+function isMessage(msg) {
+    return (
+        msg &&
+        (msg.role === "user" || msg.role === "assistant") &&
+        typeof msg.content === "string"
+    );
+}
+
 export function createChatPanel(app, node) {
     const root = el("div", "comfy-agent-chat");
 
-    const log = el("div", "comfy-agent-chat-log");
-
-    // --- Topic branching UI ---
-    const topicRow = el("div", "comfy-agent-chat-topic-row");
+    const topicTabs = el("div", "comfy-agent-chat-topic-tabs");
     const topicInput = document.createElement("input");
-    topicInput.className = "comfy-agent-chat-topic-input";
     topicInput.type = "text";
-    topicInput.placeholder = "Topic (optional)";
-    const sendBtn = el("button", "comfy-agent-chat-send", "Send");
-    const saveBlueprintBtn = el(
-        "button",
-        "comfy-agent-chat-save-blueprint",
-        "Save as blueprint"
-    );
-    const closeChatBtn = el("button", "comfy-agent-chat-close", "Close");
+    topicInput.className = "comfy-agent-chat-topic-input";
+    topicInput.placeholder = "New topic + Enter";
+    topicInput.maxLength = MAX_TOPIC_CHARS;
+    const topicRow = el("div", "comfy-agent-chat-topic-row");
+    topicRow.append(topicTabs, topicInput);
 
-    topicRow.append(topicInput, sendBtn, saveBlueprintBtn, closeChatBtn);
-    root.append(log, topicRow);
-    // --------------------------
+    const log = el("div", "comfy-agent-chat-log");
+    const inputRow = el("div", "comfy-agent-chat-input-row");
+    const input = document.createElement("textarea");
+    input.className = "comfy-agent-chat-input";
+    input.rows = 2;
+    input.placeholder = "Ask about your workflow, a node, or an error...";
+    const sendBtn = el("button", "comfy-agent-chat-send", "Send");
+
+    inputRow.append(input, sendBtn);
+    root.append(topicRow, log, inputRow);
 
     // Conversation state lives on the node so it survives re-renders and is
-    // captured by workflow save/load via onSerialize below.
-    node.comfyAgentChatHistory = node.comfyAgentChatHistory || [];
+    // captured by workflow save/load via serializeInto()/restore().
+    node.comfyAgentHistoryBranches = node.comfyAgentHistoryBranches || emptyBranches();
+    node.comfyAgentSelectedTopic = normalizeTopic(node.comfyAgentSelectedTopic);
     node.comfyAgentChatting = false;
 
-    // History branches: keyed by topic tag, each value is an array of {role, content}
-    node.comfyAgentHistoryBranches = node.comfyAgentHistoryBranches || {};
-
-    // Selected topic tag; "default" is the fallback when none provided
-    node.comfyAgentSelectedTopic = node.comfyAgentSelectedTopic || "default";
-
-    // Persistent chat_id shared across topic switches — stored on node
-    node.comfyAgentChatId = node.comfyAgentChatId || newChatId();
-
-    // WS event listeners attached during CHAT session
-    node.comfyAgentWSListeners = node.comfyAgentWSListeners || [];
-
-    // LiteGraph node widgets created during CHAT session
-    node.comfyAgentLiteGraphWidgets = node.comfyAgentLiteGraphWidgets || [];
-
-    // Load branches from localStorage on panel creation
-    const stored = localStorage.getItem("comfy_agent_chat_branches");
-    if (stored) {
-        try {
-            Object.assign(node.comfyAgentHistoryBranches, JSON.parse(stored));
-        } catch (err) {
-            console.warn("[comfy_agent] could not parse chat branches from localStorage:", err);
-            node.comfyAgentHistoryBranches = {};
-        }
-    }
-    // Ensure the selected topic branch exists
-    if (!node.comfyAgentHistoryBranches[node.comfyAgentSelectedTopic]) {
-        node.comfyAgentHistoryBranches[node.comfyAgentSelectedTopic] = [];
+    function branch(topic) {
+        const branches = node.comfyAgentHistoryBranches;
+        if (!Array.isArray(branches[topic])) branches[topic] = [];
+        return branches[topic];
     }
 
     function appendMessage(role, text) {
@@ -100,55 +107,70 @@ export function createChatPanel(app, node) {
         return row.querySelector(".comfy-agent-chat-text");
     }
 
-    function renderHistory(topic) {
-        const branch = node.comfyAgentHistoryBranches[topic] || [];
-        log.replaceChildren();
-        for (const msg of branch) {
-            appendMessage(msg.role, msg.content);
+    function renderTopicTabs() {
+        topicTabs.replaceChildren();
+        const topics = Object.keys(node.comfyAgentHistoryBranches);
+        if (!topics.includes(DEFAULT_TOPIC)) topics.unshift(DEFAULT_TOPIC);
+        for (const topic of topics) {
+            const active = topic === node.comfyAgentSelectedTopic;
+            const tab = el(
+                "button",
+                `comfy-agent-chat-topic-tab${active ? " comfy-agent-chat-topic-tab-active" : ""}`,
+                topic
+            );
+            tab.title = `Switch to the "${topic}" conversation`;
+            tab.disabled = node.comfyAgentChatting;
+            // Tabs are rebuilt on every render, so these listeners go away
+            // with the elements rather than through destroy().
+            tab.addEventListener("click", () => selectTopic(topic));
+            topicTabs.append(tab);
         }
     }
 
-    function saveBranchesToLocalStorage() {
-        try {
-            localStorage.setItem("comfy_agent_chat_branches", JSON.stringify(node.comfyAgentHistoryBranches));
-        } catch (err) {
-            console.warn("[comfy_agent] could not save chat branches to localStorage:", err);
+    function renderHistory() {
+        log.replaceChildren();
+        for (const msg of branch(node.comfyAgentSelectedTopic)) {
+            appendMessage(msg.role, msg.content);
         }
+        renderTopicTabs();
+    }
+
+    function selectTopic(raw) {
+        // Switching mid-reply would stream the answer into the wrong thread.
+        if (node.comfyAgentChatting) return;
+        const topic = normalizeTopic(raw);
+        branch(topic);
+        node.comfyAgentSelectedTopic = topic;
+        renderHistory();
     }
 
     function setBusy(busy) {
         node.comfyAgentChatting = busy;
         sendBtn.disabled = busy;
+        input.disabled = busy;
         topicInput.disabled = busy;
         sendBtn.textContent = busy ? "..." : "Send";
+        renderTopicTabs();
     }
 
     async function send() {
         const question = input.value.trim();
-        const topic = (topicInput.value || "default").trim() || "default";
         if (!question) return;
         if (node.comfyAgentChatting) return;
 
-        // Ensure the selected topic branch exists
-        if (!node.comfyAgentHistoryBranches[topic]) {
-            node.comfyAgentHistoryBranches[topic] = [];
-        }
-
-        const branchHistory = node.comfyAgentHistoryBranches[topic];
-        // Append user question to the selected topic branch
-        branchHistory.push({ role: "user", content: question });
-
-        // Switch to this topic's rendering immediately so the UI reflects the new message
-        node.comfyAgentSelectedTopic = topic;
-        renderHistory(topic);
+        // Captured once: the reply belongs to the topic the question was asked
+        // in, whatever happens to the selection while it streams.
+        const history = branch(node.comfyAgentSelectedTopic);
 
         input.value = "";
-        topicInput.value = "";
+        history.push({ role: "user", content: question });
+        appendMessage("user", question);
 
+        // A fresh id per request: the WS token router matches on it, and an
+        // id saved with the workflow would be shared by a copy-pasted node.
+        const chatId = newChatId();
+        node.comfyAgentChatId = chatId;
         setBusy(true);
-
-        const chatId = node.comfyAgentChatId;
-        // chat_id stays constant across topic switches
 
         // Streaming target. Tokens arrive over the WS and are appended here;
         // created up front so the reply area appears immediately rather than
@@ -166,12 +188,11 @@ export function createChatPanel(app, node) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    messages: branchHistory.slice(-MAX_HISTORY),
+                    messages: history.slice(-MAX_HISTORY),
                     graph: captureGraph(app),
                     last_error: node.comfyAgentLastError || "",
                     sid: api.clientId,
                     chat_id: chatId,
-                    topic: topic,
                 }),
             });
 
@@ -186,66 +207,33 @@ export function createChatPanel(app, node) {
                 replyEl.classList.add("comfy-agent-chat-error");
                 // Drop the unanswered question so the next turn does not resend
                 // a history ending in two consecutive user messages.
-                branchHistory.pop();
-                node.comfyAgentHistoryBranches[topic] = branchHistory;
-                // Re-render from updated branch history
-                renderHistory(topic);
-                saveBranchesToLocalStorage();
+                history.pop();
                 return;
             }
 
             const result = await resp.json();
             const reply = result.reply ?? streamed;
             replyEl.textContent = reply;
-            branchHistory.push({ role: "assistant", content: reply });
-            node.comfyAgentHistoryBranches[topic] = branchHistory;
-            // Re-render from updated branch history (includes new assistant message)
-            renderHistory(topic);
-            saveBranchesToLocalStorage();
-
-            // If topic changed in response, ensure branch exists
-            if (result.topic && result.topic !== topic) {
-                node.comfyAgentHistoryBranches[result.topic] = node.comfyAgentHistoryBranches[result.topic] || [];
-            }
+            history.push({ role: "assistant", content: reply });
         } catch (err) {
             replyEl.textContent = `Error: request failed (${err})`;
             replyEl.classList.add("comfy-agent-chat-error");
-            branchHistory.pop();
-            node.comfyAgentHistoryBranches[topic] = branchHistory;
-            renderHistory(topic);
-            saveBranchesToLocalStorage();
+            history.pop();
         } finally {
             node.comfyAgentOnChatToken = null;
-            // chat_id stays constant — do not reset
+            if (node.comfyAgentChatId === chatId) node.comfyAgentChatId = null;
             setBusy(false);
             log.scrollTop = log.scrollHeight;
         }
     }
 
-    // --- Topic tab switching UI ---
-    const topicTabsContainer = el("div", "comfy-agent-chat-topic-tabs");
-    root.insertBefore(topicTabsContainer, log);
-    // --------------------------------
-
-    function renderTopicTabs() {
-        // Collect all known topics (including default)
-        const topics = ["default"];
-        for (const key of Object.keys(node.comfyAgentHistoryBranches)) {
-            if (key && key !== "default") topics.push(key);
-        }
-        // Remove old tabs
-        topicTabsContainer.replaceChildren();
-        // Create a tab per topic
-        for (const topic of topics) {
-            const tab = el("span", `comfy-agent-chat-topic-tab${topic === node.comfyAgentSelectedTopic ? " comfy-agent-chat-topic-tab-active" : ""}`, topic);
-            tab.title = `Switch to ${topic} branch`;
-            on(tab, "click", () => {
-                node.comfyAgentSelectedTopic = topic;
-                renderHistory(topic);
-                // Do NOT clear input; new messages will go to this topic
-            });
-            topicTabsContainer.append(tab);
-        }
+    // Tracked so destroy() can detach them. Removing a node and adding another
+    // otherwise leaves the old panel's handlers attached to DOM that is still
+    // reachable through the closures below.
+    const listeners = [];
+    function on(target, type, handler) {
+        target.addEventListener(type, handler);
+        listeners.push([target, type, handler]);
     }
 
     on(sendBtn, "click", send);
@@ -258,181 +246,73 @@ export function createChatPanel(app, node) {
             send();
         }
     });
-    // Typing in a node must not trigger canvas shortcuts (delete node, etc.).
-    for (const evt of ["keydown", "keyup", "keypress"]) {
-        on(input, evt, (e) => e.stopPropagation());
-    }
     on(topicInput, "keydown", (event) => {
         if (event.key === "Enter") {
             event.preventDefault();
+            if (topicInput.value.trim()) selectTopic(topicInput.value);
+            topicInput.value = "";
         }
     });
-
-    closeChatBtn.onclick = cleanupChat;
-
-    // Save as blueprint button handler
-    on(saveBlueprintBtn, "click", () => {
-        // Use default node types for txt2img workflow, or could extract from conversation
-        const defaultNodeTypes = [
-            "CheckpointLoaderSimple",
-            "CLIPTextEncode",
-            "EmptyLatentImage",
-            "KSampler",
-            "VAEDecode",
-            "SaveImage",
-        ];
-
-        // Build widget values from defaults (could be enhanced to use actual chat context)
-        const widgetValues = {};
-        defaultNodeTypes.forEach((type, idx) => {
-            const typeDef = {
-                CheckpointLoaderSimple: { widgets_values: ["sd_xl_base_1.0.safetensors"], widgets_named: { ckpt_name: "sd_xl_base_1.0.safetensors" } },
-                CLIPTextEncode: { widgets_values: ["masterpiece, best quality"], widgets_named: { text: "masterpiece, best quality" } },
-                EmptyLatentImage: { widgets_values: [1024, 1024, 1], widgets_named: { width: 1024, height: 1024, batch_size: 1 } },
-                KSampler: { widgets_values: [0, "fixed", 20, 7.0, "dpmpp_2m", "karras", 1.0], widgets_named: { seed: 0, steps: 20, cfg: 7.0, sampler_name: "dpmpp_2m", scheduler: "karras", denoise: 1.0 } },
-                VAEDecode: {},
-                SaveImage: { widgets_values: ["ComfyUI"], widgets_named: { filename_prefix: "ComfyUI" } },
-            }[type];
-            if (typeDef) {
-                widgetValues[type] = typeDef;
-            }
-        });
-
-        const result = generateSubgraphFromSuggestions(defaultNodeTypes, widgetValues);
-        if (!result) {
-            alert("Failed to generate blueprint: unknown node types");
-            return;
+    // Typing in a node must not trigger canvas shortcuts (delete node, etc.).
+    for (const field of [input, topicInput]) {
+        for (const evt of ["keydown", "keyup", "keypress"]) {
+            on(field, evt, (e) => e.stopPropagation());
         }
+    }
 
-        // Validate each node type with LiteGraph.createNode()
-        let allValid = true;
-        for (const nodeDef of result.nodes) {
-            try {
-                const testNode = LiteGraph.createNode(nodeDef.type);
-                if (!testNode) {
-                    console.warn(`[comfy_agent] LiteGraph.createNode returned null for ${nodeDef.type}`);
-                    allValid = false;
-                }
-            } catch (err) {
-                console.warn(`[comfy_agent] LiteGraph.createNode threw for ${nodeDef.type}:`, err);
-                allValid = false;
-            }
-        }
-
-        if (!allValid) {
-            alert("Blueprint generated but some node types could not be validated with LiteGraph");
-            return;
-        }
-
-        // Save to blueprint_defs/ directory
-        const blueprintName = `${result.extra.comfy_agent_blueprint.name}_${Date.now()}.json`;
-        const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-
-        // Try to prompt save, or auto-drop in blueprint_defs/
-        if (window.showSaveFilePicker) {
-            try {
-                const handle = await window.showSaveFilePicker({
-                    types: [{ suggestedName: blueprintName, accept: { ".json": [".json"] } }],
-                });
-                const fileHandle = await window.showSaveFilePicker({
-                    types: [{ suggestedName: blueprintName, accept: { ".json": [".json"] } }],
-                });
-                // Write to file
-                const writable = await fileHandle.createWritable();
-                await writable.write(JSON.stringify(result, null, 2));
-                await writable.close();
-                alert(`Blueprint saved to ${blueprintName}`);
-            } catch (e) {
-                // Fallback: just show the JSON and suggest user save it
-                console.log("Blueprint JSON:", JSON.stringify(result, null, 2));
-                alert(`Blueprint generated: ${blueprintName}. Copy the JSON above and save to blueprint_defs/`);
-            }
-        } else {
-            // No file picker available - just alert with the JSON and suggest save location
-            console.log("Blueprint JSON:", JSON.stringify(result, null, 2));
-            alert(`Blueprint generated: ${blueprintName}. Save to blueprint_defs/ directory.`);
-        }
-    });
-
-    // Initial render: history of selected topic, tabs
-    renderHistory(node.comfyAgentSelectedTopic);
-    renderTopicTabs();
+    renderHistory();
 
     return {
         root,
         renderHistory,
-        clear() {
-            node.comfyAgentChatHistory = [];
-            node.comfyAgentHistoryBranches = {};
-            node.comfyAgentSelectedTopic = "default";
-            node.comfyAgentChatId = newChatId();
-            // Clear localStorage
-            try { localStorage.removeItem("comfy_agent_chat_branches"); } catch (e) {}
-            renderHistory();
-            renderTopicTabs();
+
+        /** Write the conversation into a workflow-save payload. */
+        serializeInto(info) {
+            info.comfyAgentHistoryBranches = node.comfyAgentHistoryBranches;
+            info.comfyAgentSelectedTopic = node.comfyAgentSelectedTopic;
+            // The pre-topics key, so a workflow saved here still shows its
+            // main thread in an older version of the node.
+            info.comfyAgentChatHistory = branch(DEFAULT_TOPIC);
         },
+
+        /** Load the conversation from a saved workflow. Validates every
+         *  message, since a hand-edited .json is replayed into the model. */
+        restore(info) {
+            const branches = emptyBranches();
+            const saved = info?.comfyAgentHistoryBranches;
+            if (saved && typeof saved === "object") {
+                for (const [rawTopic, messages] of Object.entries(saved)) {
+                    if (!Array.isArray(messages)) continue;
+                    branches[normalizeTopic(rawTopic)] = messages.filter(isMessage);
+                }
+            } else if (Array.isArray(info?.comfyAgentChatHistory)) {
+                // Saved before topics existed: the single thread is the default.
+                branches[DEFAULT_TOPIC] = info.comfyAgentChatHistory.filter(isMessage);
+            }
+            node.comfyAgentHistoryBranches = branches;
+            const topic = normalizeTopic(info?.comfyAgentSelectedTopic);
+            node.comfyAgentSelectedTopic = topic in branches ? topic : DEFAULT_TOPIC;
+            renderHistory();
+        },
+
+        /** Clear Chat: discard every topic. */
+        clear() {
+            if (node.comfyAgentChatting) return;
+            node.comfyAgentHistoryBranches = emptyBranches();
+            node.comfyAgentSelectedTopic = DEFAULT_TOPIC;
+            renderHistory();
+        },
+
         /** Detach every listener and drop the streaming callback. Called from
          *  the node's onRemoved so a deleted node leaves nothing behind. */
         destroy() {
-            window.removeEventListener("beforeunload", cleanupChat);
             for (const [target, type, handler] of listeners) {
                 target.removeEventListener(type, handler);
             }
             listeners.length = 0;
             node.comfyAgentOnChatToken = null;
             log.replaceChildren();
-            // Persist branches on destroy
-            saveBranchesToLocalStorage();
-            // Remove topic tabs and input row from DOM
-            topicTabsContainer.replaceChildren();
-            topicRow.replaceChildren();
+            topicTabs.replaceChildren();
         },
-
-        /** Clean up all CHAT resources when the panel closes */
-        cleanupChat() {
-            // Remove all WS event listeners attached during the CHAT session
-            if (node.comfyAgentWSListeners) {
-                for (const [target, type, handler] of node.comfyAgentWSListeners) {
-                    target.removeEventListener(type, handler);
-                }
-                node.comfyAgentWSListeners.length = 0;
-            }
-            // Dereference LiteGraph node widgets created during CHAT
-            if (node.comfyAgentLiteGraphWidgets) {
-                for (const widget of node.comfyAgentLiteGraphWidgets) {
-                    if (widget && typeof widget.destroy === "function") {
-                        widget.destroy();
-                    } else {
-                        widget = null;
-                    }
-                }
-                node.comfyAgentLiteGraphWidgets.length = 0;
-            }
-            // Clear conversation history from localStorage if persisted
-            try { localStorage.removeItem("comfy_agent_chat_branches"); } catch (e) {}
-            // Dispatch a chat:cleaned event for other modules to react
-            document.dispatchEvent(new Event("chat:cleaned"));
-        }
-
-        // Ensure cleanup also happens on explicit "Close" button click,
-        // not just page unload (handled above via closeChatBtn.onclick)
-
-        window.addEventListener("beforeunload", cleanupChat);
-
-        return {
-            root,
-            renderHistory,
-            clear() {
-            node.comfyAgentChatHistory = [];
-            node.comfyAgentHistoryBranches = {};
-            node.comfyAgentSelectedTopic = "default";
-            node.comfyAgentChatId = newChatId();
-            // Clear localStorage
-            try { localStorage.removeItem("comfy_agent_chat_branches"); } catch (e) {}
-            renderHistory();
-            renderTopicTabs();
-        },
-        destroy,
     };
 }

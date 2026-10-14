@@ -9,6 +9,7 @@ with none of them installed.
 
 import asyncio
 import importlib.util
+import json
 import pathlib
 import sys
 import types
@@ -148,6 +149,59 @@ def test_health_rejects_unauthorized_peer():
     print("ok: health refuses a non-localhost peer")
 
 
+def _authorized(remote, *, token="", allow_network=False, cidrs=(), header=None):
+    saved = (config.AGENT_API_TOKEN, config.ALLOW_NETWORK, config.ALLOWED_NETWORK_CIDRS)
+    config.AGENT_API_TOKEN = token
+    config.ALLOW_NETWORK = allow_network
+    config.ALLOWED_NETWORK_CIDRS = list(cidrs)
+    try:
+        request = _FakeRequest(remote=remote)
+        if header is not None:
+            request.headers["X-Agent-Token"] = header
+        return agent_routes._is_authorized(request)
+    finally:
+        config.AGENT_API_TOKEN, config.ALLOW_NETWORK, config.ALLOWED_NETWORK_CIDRS = saved
+
+
+def test_token_is_not_generated_when_unset():
+    """A random token nobody can read locked remote clients out while
+    looking configured."""
+    import os
+
+    if not os.getenv("AGENT_API_TOKEN"):
+        assert config.AGENT_API_TOKEN == ""
+    print("ok: no token is invented when none is configured")
+
+
+def test_localhost_never_needs_a_token():
+    assert _authorized("127.0.0.1", token="s3cret", allow_network=True)
+    assert _authorized("::1", token="s3cret", cidrs=["10.0.0.0/8"])
+    print("ok: localhost needs no token")
+
+
+def test_cidr_peer_must_send_a_configured_token():
+    """The token used to be ignored for CIDR peers entirely."""
+    cidrs = ["10.0.0.0/8"]
+    assert not _authorized("10.1.2.3", token="s3cret", cidrs=cidrs)
+    assert not _authorized("10.1.2.3", token="s3cret", cidrs=cidrs, header="wrong")
+    assert _authorized("10.1.2.3", token="s3cret", cidrs=cidrs, header="s3cret")
+    print("ok: a configured token is required from allow-listed networks")
+
+
+def test_cidr_peer_without_a_token_configured_is_allowed():
+    assert _authorized("10.1.2.3", cidrs=["10.0.0.0/8"])
+    assert not _authorized("192.168.1.5", cidrs=["10.0.0.0/8"])
+    print("ok: without a token, the CIDR allowlist alone decides")
+
+
+def test_allow_network_requires_a_matching_token():
+    assert not _authorized("203.0.113.9", allow_network=True)
+    assert not _authorized("203.0.113.9", allow_network=True, header="")
+    assert not _authorized("203.0.113.9", token="s3cret", allow_network=True, header="nope")
+    assert _authorized("203.0.113.9", token="s3cret", allow_network=True, header="s3cret")
+    print("ok: ALLOW_NETWORK admits only requests with the configured token")
+
+
 def test_health_reports_index_not_ready():
     _patch(available=True, installed=[config.BASE_MODEL])
     install_index._index = None
@@ -186,6 +240,162 @@ def test_superseded_modes_name_their_replacement():
         assert mode in result["error_detail"]
         assert result["execution_ready"] is False
     print("ok: superseded modes point the user at CHAT")
+
+
+# --- /agent/chat: prompt budgeting. Lives here because this file already
+# builds the stubbed route harness; a missing import in agent_routes (the
+# count_prompt_tokens regression) fails this whole module at collection. ---
+
+chat_context = agent_routes.chat_context
+
+
+class _FakeJSONRequest(_FakeRequest):
+    def __init__(self, body):
+        super().__init__()
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+def _chat_turns(n_pairs, size):
+    turns = []
+    for i in range(n_pairs):
+        turns.append({"role": "user", "content": f"q{i} " + "u" * size})
+        turns.append({"role": "assistant", "content": f"a{i} " + "a" * size})
+    turns.append({"role": "user", "content": "THE QUESTION"})
+    return turns
+
+
+def _run_chat(body, *, system_for_graph, summarize=None, reply="ok", fail=None, ctx=1000):
+    """Drive /agent/chat with every Ollama and context call stubbed.
+
+    Returns (response, captured) where captured records what reached the
+    model and how the system prompt was built.
+    """
+    captured = {"stream_calls": [], "system_builds": []}
+
+    async def fake_is_available():
+        return True
+
+    async def fake_build_system_prompt(question, graph, last_error=""):
+        captured["system_builds"].append(graph)
+        return system_for_graph(graph)
+
+    async def fake_summarize(messages):
+        if summarize is None:
+            raise AssertionError("summarize_history should not have been called")
+        return summarize(messages)
+
+    async def fake_chat_stream(messages, *, system=None, model=None, on_token=None):
+        captured["stream_calls"].append({"messages": list(messages), "system": system})
+        if fail is not None:
+            raise fail
+        return reply
+
+    saved = (
+        llm_client.is_available,
+        llm_client.chat_stream,
+        chat_context.build_system_prompt,
+        chat_context.summarize_history,
+        config.OLLAMA_CHAT_NUM_CTX,
+    )
+    llm_client.is_available = fake_is_available
+    llm_client.chat_stream = fake_chat_stream
+    chat_context.build_system_prompt = fake_build_system_prompt
+    chat_context.summarize_history = fake_summarize
+    config.OLLAMA_CHAT_NUM_CTX = ctx
+    try:
+        handler = _fake_routes.handlers["/agent/chat"]
+        response = asyncio.run(handler(_FakeJSONRequest(body)))
+    finally:
+        (
+            llm_client.is_available,
+            llm_client.chat_stream,
+            chat_context.build_system_prompt,
+            chat_context.summarize_history,
+            config.OLLAMA_CHAT_NUM_CTX,
+        ) = saved
+    return response, captured
+
+
+def test_prompt_token_estimate_counts_the_system_prompt():
+    """The system block (canvas, inventory, schemas) is most of a real chat
+    request; an estimate that ignores it never trips the budget."""
+    messages = [{"role": "user", "content": "x" * 400}]
+    without = chat_context.count_prompt_tokens(messages)
+    with_system = chat_context.count_prompt_tokens(messages, "s" * 4000)
+    assert with_system > without * 5, (without, with_system)
+    print("ok: token estimate includes the system prompt")
+
+
+def test_small_chat_is_sent_unchanged():
+    body = {"messages": [{"role": "user", "content": "hi"}], "graph": {"nodes": []}}
+    response, captured = _run_chat(body, system_for_graph=lambda g: "SYS")
+    assert response.status == 200
+    assert len(captured["stream_calls"]) == 1
+    assert captured["stream_calls"][0]["messages"] == body["messages"]
+    assert captured["stream_calls"][0]["system"] == "SYS"
+    print("ok: a chat under budget is sent as-is")
+
+
+def test_oversized_history_is_summarised_and_still_ends_on_the_question():
+    """The summary must not become a trailing assistant turn — that left the
+    model with no question to answer."""
+    body = {"messages": _chat_turns(n_pairs=5, size=600), "graph": None}
+
+    def summarize(messages):
+        return "- user is building an SDXL workflow", messages[-3:-1]
+
+    response, captured = _run_chat(
+        body, system_for_graph=lambda g: "SYS", summarize=summarize
+    )
+    assert response.status == 200, response.body
+    sent = captured["stream_calls"][0]
+    assert sent["messages"][-1] == {"role": "user", "content": "THE QUESTION"}
+    assert all(m["role"] in ("user", "assistant") for m in sent["messages"])
+    assert "SDXL workflow" in sent["system"], "summary belongs in the system prompt"
+    assert len(sent["messages"]) == 3
+    print("ok: summarised history keeps the question last")
+
+
+def test_canvas_is_dropped_when_summarising_is_not_enough():
+    """Dropping the graph only helps if the system prompt is rebuilt — the
+    old code set graph = None after the prompt was already rendered."""
+    body = {
+        "messages": [{"role": "user", "content": "why is this broken?"}],
+        "graph": {"nodes": [{"id": 1, "type": "KSampler"}]},
+    }
+
+    def system_for_graph(graph):
+        return "G" * 20000 if graph else "SMALL"
+
+    response, captured = _run_chat(body, system_for_graph=system_for_graph)
+    assert response.status == 200, response.body
+    assert captured["system_builds"][-1] is None, "must rebuild without the canvas"
+    assert captured["stream_calls"][0]["system"] == "SMALL"
+    print("ok: an oversized canvas is dropped from the prompt")
+
+
+def test_budget_follows_the_configured_context_window():
+    """Lowering OLLAMA_CHAT_NUM_CTX is the documented VRAM fix, so the
+    budget must follow it rather than a hardcoded 65536."""
+    body = {"messages": [{"role": "user", "content": "hi"}], "graph": None}
+    response, _ = _run_chat(body, system_for_graph=lambda g: "SYS", ctx=16384)
+    assert json.loads(response.body)["token_budget"]["total"] == 16384
+    print("ok: budget is reported against the configured window")
+
+
+def test_failed_reply_is_not_retried_without_the_question():
+    body = {"messages": _chat_turns(n_pairs=1, size=10), "graph": None}
+    response, captured = _run_chat(
+        body,
+        system_for_graph=lambda g: "SYS",
+        fail=llm_client.OllamaGenerationError("boom"),
+    )
+    assert response.status == 502
+    assert len(captured["stream_calls"]) == 1, "no silent retry on a different question"
+    print("ok: a failed reply is reported, not retried")
 
 
 if __name__ == "__main__":

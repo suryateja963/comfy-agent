@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,22 @@ MODEL_KEYWORD_WEIGHT = 3
 MODEL_KEYWORDS = frozenset({"flux", "sdxl"})
 
 
+def _keyword_pattern(keyword: str) -> re.Pattern[str]:
+    """Whole-word match, with an optional plural "s".
+
+    Plain substring matching picked blueprints from fragments of unrelated
+    words: "I **wan**t a photo of a cat" built the Wan *video* workflow,
+    "laptop sur**face**" the face detailer, "pur**pose**" ControlNet. Word
+    boundaries fix that; the optional "s" keeps "faces" and "poses" matching.
+    """
+    return re.compile(rf"\b{re.escape(keyword)}s?\b")
+
+
+_KEYWORD_PATTERNS: dict[str, re.Pattern[str]] = {
+    kw: _keyword_pattern(kw) for kws in BLUEPRINT_KEYWORDS.values() for kw in kws
+}
+
+
 def match(task_prompt: str, task_category: str = "auto", model_family: str = "auto") -> str | None:
     """Return the best-matching blueprint name, or None if nothing scores > 0.
 
@@ -95,7 +112,7 @@ def match(task_prompt: str, task_category: str = "auto", model_family: str = "au
         score = 0
         longest_hit = ""
         for kw in keywords:
-            if kw in text:
+            if _KEYWORD_PATTERNS[kw].search(text):
                 score += MODEL_KEYWORD_WEIGHT if kw in MODEL_KEYWORDS else 1
                 if len(kw) > len(longest_hit):
                     longest_hit = kw
