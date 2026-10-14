@@ -31,7 +31,13 @@ Icon = ""
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The suites build their package tree by hand (ComfyUI's comfy_api/server are
-# not importable outside a running install), so no conftest or rootdir magic
-# is needed.
-addopts = "-q"
+# The suites build their package tree by hand, because ComfyUI's comfy_api and
+# server are not importable outside a running install. The repo root holds the
+# node's __init__.py, though, so pytest would collect it as a package and
+# import it first — which fails without ComfyUI, and fails outright in a
+# `comfy-agent` checkout (not a valid package name). The plugin below makes
+# pytest treat the root as a plain directory. It must be a plugin rather than
+# a conftest.py: a conftest beside __init__.py is imported as part of the
+# package and hits the same failure.
+pythonpath = ["tests"]
+addopts = "-q -p _collect_root_as_dir"
