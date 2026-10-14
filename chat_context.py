@@ -21,6 +21,22 @@ from .knowledge import schema_compactor
 
 logger = logging.getLogger("comfy_agent.chat_context")
 
+
+def count_prompt_tokens(messages: list[dict[str, str]], system: str = "") -> int:
+    """Estimate the tokens one chat request sends: system prompt plus messages.
+
+    The system prompt must be counted — it carries the canvas, the model
+    inventory, the retrieved schemas and the last error, and is usually most
+    of the request. Character-based (config.CHARS_PER_TOKEN_ESTIMATE) rather
+    than a real tokenizer: the budget check needs an order of magnitude, and a
+    tokenizer would be a new dependency.
+    """
+    chars = len(system or "")
+    for message in messages:
+        chars += len(str(message.get("content", "")))
+    return chars // max(1, config.CHARS_PER_TOKEN_ESTIMATE)
+
+
 def get_graph_char_budget(model_name: str = "") -> int:
     """Return CHAT_MAX_GRAPH_CHARS based on model parameters.
 

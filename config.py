@@ -96,6 +96,10 @@ CHAT_MAX_GRAPH_CHARS = 6000
 # Concurrent chat requests served at once.
 MAX_CONCURRENT_CHATS = 2
 
+# Share of OLLAMA_CHAT_NUM_CTX a chat prompt may use; the rest is left for the
+# reply. Past it, older turns are summarised and then the canvas is dropped.
+CHAT_PROMPT_BUDGET_FRACTION = 0.6
+
 # --- Install knowledge index (semantic retrieval) ---
 # The full /object_info on a real install is ~2.7 MB / 1767 node types — about
 # 680k tokens, an order of magnitude past even OLLAMA_CHAT_NUM_CTX. So the
