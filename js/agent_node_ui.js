@@ -415,15 +415,15 @@ app.registerExtension({
         const originalOnSerialize = node.onSerialize;
         node.onSerialize = function (info) {
             originalOnSerialize?.apply(this, arguments);
-            info.comfyAgentChatHistory = this.comfyAgentChatHistory || [];
+            // Topics and the selected one; also the legacy single-thread key.
+            // The chat_id is deliberately not saved — it is per request.
+            chat.serializeInto(info);
         };
         const originalOnConfigure = node.onConfigure;
         node.onConfigure = function (info) {
             originalOnConfigure?.apply(this, arguments);
-            if (Array.isArray(info?.comfyAgentChatHistory)) {
-                this.comfyAgentChatHistory = info.comfyAgentChatHistory;
-                chat.renderHistory();
-            }
+            // Handles both topic-era saves and older single-thread ones.
+            chat.restore(info);
             applyMode();
         };
 

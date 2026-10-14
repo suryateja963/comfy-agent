@@ -116,3 +116,53 @@
     opacity: 0.5;
     cursor: default;
 }
+
+/* Topic row: one tab per conversation thread, plus an input for a new one. */
+.comfy-agent-chat-topic-row {
+    display: flex;
+    gap: 6px;
+    flex: 0 0 auto;
+    align-items: center;
+}
+
+.comfy-agent-chat-topic-tabs {
+    display: flex;
+    gap: 4px;
+    flex: 1 1 auto;
+    overflow-x: auto;
+}
+
+.comfy-agent-chat-topic-tab {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.9em;
+    color: var(--input-text, #ddd);
+    background: transparent;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 10px;
+    opacity: 0.7;
+}
+
+.comfy-agent-chat-topic-tab-active {
+    background: var(--comfy-menu-bg, #353535);
+    opacity: 1;
+}
+
+.comfy-agent-chat-topic-tab:disabled {
+    cursor: default;
+}
+
+.comfy-agent-chat-topic-input {
+    flex: 0 0 9em;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 2px 6px;
+    font: inherit;
+    font-size: 0.9em;
+    color: var(--input-text, #ddd);
+    background: var(--comfy-input-bg, #1a1a1a);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+}
