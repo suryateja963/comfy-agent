@@ -149,6 +149,59 @@ def test_health_rejects_unauthorized_peer():
     print("ok: health refuses a non-localhost peer")
 
 
+def _authorized(remote, *, token="", allow_network=False, cidrs=(), header=None):
+    saved = (config.AGENT_API_TOKEN, config.ALLOW_NETWORK, config.ALLOWED_NETWORK_CIDRS)
+    config.AGENT_API_TOKEN = token
+    config.ALLOW_NETWORK = allow_network
+    config.ALLOWED_NETWORK_CIDRS = list(cidrs)
+    try:
+        request = _FakeRequest(remote=remote)
+        if header is not None:
+            request.headers["X-Agent-Token"] = header
+        return agent_routes._is_authorized(request)
+    finally:
+        config.AGENT_API_TOKEN, config.ALLOW_NETWORK, config.ALLOWED_NETWORK_CIDRS = saved
+
+
+def test_token_is_not_generated_when_unset():
+    """A random token nobody can read locked remote clients out while
+    looking configured."""
+    import os
+
+    if not os.getenv("AGENT_API_TOKEN"):
+        assert config.AGENT_API_TOKEN == ""
+    print("ok: no token is invented when none is configured")
+
+
+def test_localhost_never_needs_a_token():
+    assert _authorized("127.0.0.1", token="s3cret", allow_network=True)
+    assert _authorized("::1", token="s3cret", cidrs=["10.0.0.0/8"])
+    print("ok: localhost needs no token")
+
+
+def test_cidr_peer_must_send_a_configured_token():
+    """The token used to be ignored for CIDR peers entirely."""
+    cidrs = ["10.0.0.0/8"]
+    assert not _authorized("10.1.2.3", token="s3cret", cidrs=cidrs)
+    assert not _authorized("10.1.2.3", token="s3cret", cidrs=cidrs, header="wrong")
+    assert _authorized("10.1.2.3", token="s3cret", cidrs=cidrs, header="s3cret")
+    print("ok: a configured token is required from allow-listed networks")
+
+
+def test_cidr_peer_without_a_token_configured_is_allowed():
+    assert _authorized("10.1.2.3", cidrs=["10.0.0.0/8"])
+    assert not _authorized("192.168.1.5", cidrs=["10.0.0.0/8"])
+    print("ok: without a token, the CIDR allowlist alone decides")
+
+
+def test_allow_network_requires_a_matching_token():
+    assert not _authorized("203.0.113.9", allow_network=True)
+    assert not _authorized("203.0.113.9", allow_network=True, header="")
+    assert not _authorized("203.0.113.9", token="s3cret", allow_network=True, header="nope")
+    assert _authorized("203.0.113.9", token="s3cret", allow_network=True, header="s3cret")
+    print("ok: ALLOW_NETWORK admits only requests with the configured token")
+
+
 def test_health_reports_index_not_ready():
     _patch(available=True, installed=[config.BASE_MODEL])
     install_index._index = None

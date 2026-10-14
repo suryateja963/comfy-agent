@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import secrets
 
 
 def _normalize_host(raw: str, default_port: int) -> str:
@@ -179,14 +178,15 @@ ALLOW_NETWORK = False
 # is True (that flag already allows everything).
 ALLOWED_NETWORK_CIDRS: list[str] = []
 
-# Shared secret required on non-localhost requests, sent as X-Agent-Token.
-# Strongly recommended whenever ALLOWED_NETWORK_CIDRS is non-empty; an empty
-# value disables the check.
-# Generated automatically if left empty, ensuring a token is always present
-# when ALLOW_NETWORK is enabled. Idempotent: only generated when empty on import.
+# Shared secret for non-localhost requests, sent as the X-Agent-Token header.
+# Set it through the AGENT_API_TOKEN environment variable (or here).
+#   - ALLOW_NETWORK = True: required. Empty means every remote request is
+#     refused, since there is nothing a client could send.
+#   - ALLOWED_NETWORK_CIDRS: required when set; when empty, peers in those
+#     ranges are allowed without one (a warning is logged at startup).
+# Never generated automatically: a random token nobody can read locks remote
+# clients out while looking configured.
 AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "")
-if not AGENT_API_TOKEN:
-    AGENT_API_TOKEN = secrets.token_hex(16)
 
 BLUEPRINT_DIR_NAME = "blueprint_defs"
 

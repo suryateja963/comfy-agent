@@ -68,26 +68,54 @@ def _peer_in_allowed_cidrs(request: web.Request) -> bool:
     return False
 
 
+def _configured_token() -> str:
+    return getattr(config, "AGENT_API_TOKEN", "") or ""
+
+
+def _token_matches(request: web.Request, token: str) -> bool:
+    # compare_digest needs equal types; a missing header compares as "".
+    return secrets.compare_digest(request.headers.get("X-Agent-Token", ""), token)
+
+
 def _is_authorized(request: web.Request) -> bool:
     """Access control for the agent routes.
 
-    localhost is always allowed. Beyond that, token enforcement depends on
-    ALLOW_NETWORK:
-    - ALLOW_NETWORK=True: require a non-empty AGENT_API_TOKEN, validated
-      via secrets.compare_digest(). Empty token → deny access.
-    - ALLOW_NETWORK=False (default): localhost only; beyond that, CIDR
-      allowlist applies but no token check is required.
+    - localhost: always allowed.
+    - ALLOW_NETWORK=True: any peer, but only with X-Agent-Token matching
+      AGENT_API_TOKEN. No token configured means no remote access at all.
+    - Otherwise, peers in ALLOWED_NETWORK_CIDRS: allowed, and must also send
+      the token whenever one is configured. Previously the token was never
+      checked on this path, although the README recommended pairing them.
     """
     if _is_localhost(request):
         return True
+    token = _configured_token()
     if config.ALLOW_NETWORK:
-        token = getattr(config, "AGENT_API_TOKEN", "") or ""
-        if not token:
-            return False
-        return secrets.compare_digest(request.headers.get("X-Agent-Token", ""), token)
+        return bool(token) and _token_matches(request, token)
     if not _peer_in_allowed_cidrs(request):
         return False
-    return True
+    return not token or _token_matches(request, token)
+
+
+def _warn_about_network_config() -> None:
+    """Say at startup when the network settings will not do what they look
+    like. Otherwise the first sign is a remote client getting 403s, or
+    nothing at all when a whole subnet can drive the agent unauthenticated."""
+    token = _configured_token()
+    if config.ALLOW_NETWORK and not token:
+        logger.warning(
+            "ALLOW_NETWORK is on but AGENT_API_TOKEN is empty, so every remote "
+            "request will be refused. Set the AGENT_API_TOKEN environment variable."
+        )
+    elif not config.ALLOW_NETWORK and getattr(config, "ALLOWED_NETWORK_CIDRS", None) and not token:
+        logger.warning(
+            "ALLOWED_NETWORK_CIDRS is set without AGENT_API_TOKEN: any machine in %s "
+            "can use the agent without a token.",
+            ", ".join(config.ALLOWED_NETWORK_CIDRS),
+        )
+
+
+_warn_about_network_config()
 
 
 def _is_allowed_origin(request: web.Request) -> bool:

@@ -153,7 +153,7 @@ variables, which survive updating the node:
 | Variable | Default | Purpose |
 |---|---|---|
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Where Ollama is reached. Ollama's own `0.0.0.0:11434` form is accepted |
-| `AGENT_API_TOKEN` | random each start | Token required from remote clients when `ALLOW_NETWORK = True` (see [Security](#security)) |
+| `AGENT_API_TOKEN` | empty | Token remote clients must send in the `X-Agent-Token` header (see [Security](#security)) |
 
 Everything else is edited in `config.py`. Note that `git pull` will conflict
 with local edits to that file.
@@ -220,13 +220,14 @@ agent action can be undone.
 - **Local only by default.** The `/agent/*` endpoints refuse requests that
   don't come from this machine. Build and chat requests sent by other websites
   open in your browser are also rejected.
-- **Opening it to other machines:**
-  - `ALLOWED_NETWORK_CIDRS` (e.g. `["192.168.1.0/24"]`) allows those addresses.
-    Currently **no token is checked** for them, so only list networks you trust.
-  - `ALLOW_NETWORK = True` allows any address, but requires the
-    `X-Agent-Token` header to match `AGENT_API_TOKEN`. Set that token through
-    the environment variable; if you don't, a random one is generated at each
-    start and never shown, so every remote request is refused.
+- **Opening it to other machines.** Set a token with the `AGENT_API_TOKEN`
+  environment variable; remote clients send it in the `X-Agent-Token` header.
+  Then choose one of:
+  - `ALLOWED_NETWORK_CIDRS` (e.g. `["192.168.1.0/24"]`) — allows those
+    addresses, and requires the token when one is set. Without a token anyone
+    on those networks can use the agent, and the ComfyUI console warns you.
+  - `ALLOW_NETWORK = True` — allows any address, but only with the token. If
+    no token is set, every remote request is refused, and the console says so.
 - **Behind a reverse proxy or tunnel**, every request appears to come from the
   local machine, so the local-only check no longer protects you. Add
   authentication at the proxy.
