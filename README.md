@@ -67,8 +67,13 @@ What exists:
   - `llm_client.chat_stream()` deliberately sends **no** `format` constraint —
     every other call here is schema-constrained, which is right for building a
     graph and exactly wrong for conversation.
-  - Chat history is saved with the workflow via `onSerialize`, not through a
-    widget value.
+  - Chat history, split into topics, is saved with the workflow via
+    `onSerialize`, not through a widget value or `localStorage` (which is
+    shared by every workflow and leaked one workflow's chats into another).
+  - Prompt size is budgeted against `OLLAMA_CHAT_NUM_CTX`, counting the system
+    prompt too. Past the budget, older turns are summarised into the system
+    prompt and then the canvas is dropped; the request always ends on the
+    user's question.
 - **`install_index.py` — semantic index over the whole installation.** This is
   what lets CHAT answer about any installed node rather than a keyword-matched
   subset. The registry cannot simply be prompted: on this install `/object_info`
@@ -275,7 +280,20 @@ like these resolve against reality:
 rebuilds; every question after that is fast. Watch the ComfyUI console for
 `building install index: embedding N nodes...` if it seems to hang.
 
-`Clear Chat` discards the thread. History is otherwise saved with the workflow.
+**Topics.** The row above the scrollback holds one tab per conversation topic.
+Type a name into *New topic* and press Enter to start a separate thread, or
+click a tab to switch back to one. Each topic keeps its own history, so the
+model only sees the thread you are in, not every question you have asked. You
+cannot switch topics while a reply is streaming.
+
+All topics are saved with the workflow. A workflow saved before topics existed
+opens with its old thread under `default`. `Clear Chat` discards every topic.
+
+**Long conversations.** If a request would use more than
+`CHAT_PROMPT_BUDGET_FRACTION` (60%) of `OLLAMA_CHAT_NUM_CTX`, older turns are
+summarised into the system prompt and only the recent ones are sent. If that is
+still too large, the canvas snapshot is left out of that request. The answer
+then stays within the context window instead of losing your question.
 
 ### 4. Configuration
 
@@ -289,7 +307,9 @@ roughly 3-4 GB at 65536, on top of the model weights, competing with ComfyUI
 for the same GPU. **If a large SDXL/Flux generation OOMs while chatting, lower
 this first**; 32768 and 16384 are safe steps down. Because retrieval keeps real
 prompts near ~1300 tokens, answers barely change — the headroom exists for long
-conversations and large graphs, not for typical questions.
+conversations and large graphs, not for typical questions. The prompt budget
+follows this value, so a lower setting summarises long conversations sooner
+rather than overflowing.
 
 ### 5. Run the tests
 
