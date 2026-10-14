@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from . import config, install_index, llm_client
@@ -37,16 +38,32 @@ def count_prompt_tokens(messages: list[dict[str, str]], system: str = "") -> int
     return chars // max(1, config.CHARS_PER_TOKEN_ESTIMATE)
 
 
-def get_graph_char_budget(model_name: str = "") -> int:
-    """Return CHAT_MAX_GRAPH_CHARS based on model parameters.
+# Parameter count in an Ollama model name: "qwen3.5:0.8b", "qwen3.5-0.8b-
+# comfyagent", "llama3.1:8b". The version number ("3.5") is not followed by
+# "b", so the first match is the size.
+_MODEL_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)b\b")
 
-    Small models (0.8b, 4b) get a conservative budget to avoid OOM;
-    larger models can afford more graph context.
+# Models at or below this many billion parameters get the reduced graph budget.
+SMALL_MODEL_MAX_BILLIONS = 8.0
+
+
+def _model_size_billions(model_name: str) -> float | None:
+    match = _MODEL_SIZE_RE.search(model_name.lower())
+    return float(match.group(1)) if match else None
+
+
+def get_graph_char_budget(model_name: str = "") -> int:
+    """CHAT_MAX_GRAPH_CHARS, halved for small models.
+
+    A small model loses the question under a large graph long before the
+    context window fills. The size is read from the model's name, so the
+    locally built fine-tune (`qwen3.5-0.8b-comfyagent`) counts as small too;
+    a hardcoded name list missed it. A name with no size gets the full budget.
     """
-    small_models = ["qwen3.5:0.8b", "qwen3.5:4b", "llama3.1:8b"]
-    if any(m in model_name.lower() for m in small_models):
-        return config.CHAT_MAX_GRAPH_CHARS // 2  # halve the budget for small models
-    return config.CHAT_MAX_GRAPH_CHARS  # full budget for larger models
+    size = _model_size_billions(model_name)
+    if size is not None and size <= SMALL_MODEL_MAX_BILLIONS:
+        return config.CHAT_MAX_GRAPH_CHARS // 2
+    return config.CHAT_MAX_GRAPH_CHARS
 
 
 async def summarize_history(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -246,17 +263,15 @@ async def build_system_prompt(question: str, graph: Any, last_error: str = "") -
     except Exception as exc:  # noqa: BLE001
         logger.debug("chat: install index unavailable: %s", exc)
 
-    # Model-aware graph character budgeting (Section 4A): small models get
-    # a reduced graph context to avoid OOM; larger models can afford more.
+    # Model-aware graph budget (Section 4A): small models get less of the
+    # canvas. resolve_models() is cached per process and names the model
+    # chat_stream() will actually use; listing Ollama's models here added a
+    # network round trip to every chat message.
     model_name = ""
     try:
-        installed = await llm_client.list_installed()
-        primary = config.PRIMARY_MODEL
-        primary, _ = await llm_client.resolve_models()
-        if primary in installed:
-            model_name = primary
+        model_name, _ = await llm_client.resolve_models()
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("chat: could not resolve the chat model; using the full graph budget")
     graph_budget = get_graph_char_budget(model_name)
 
     graph_block = render_graph_block(graph)

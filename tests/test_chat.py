@@ -371,6 +371,20 @@ def test_category_boost_does_not_add_irrelevant_nodes():
     print("ok: a boost only reorders nodes that already matched")
 
 
+def test_graph_budget_reads_model_size_from_the_name():
+    """The hardcoded list missed the default fine-tune's name, so the model
+    the node ships configured for got the large-model budget."""
+    full = config.CHAT_MAX_GRAPH_CHARS
+    assert chat_context.get_graph_char_budget("qwen3.5-0.8b-comfyagent") == full // 2
+    assert chat_context.get_graph_char_budget("qwen3.5:0.8b") == full // 2
+    assert chat_context.get_graph_char_budget("qwen3.5:4b") == full // 2
+    assert chat_context.get_graph_char_budget("qwen3.5:9b") == full
+    assert chat_context.get_graph_char_budget("llama3.1:70b") == full
+    assert chat_context.get_graph_char_budget("mystery-model") == full
+    assert chat_context.get_graph_char_budget("") == full
+    print("ok: graph budget follows the model's parameter count")
+
+
 def test_cosine_handles_zero_vectors():
     assert install_index._cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
     assert abs(install_index._cosine([1.0, 0.0], [1.0, 0.0]) - 1.0) < 1e-9
